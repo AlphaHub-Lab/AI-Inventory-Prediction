@@ -2,6 +2,7 @@ from datetime import date, datetime, timedelta
 from io import StringIO
 import csv
 import uuid
+from math import ceil
 from decimal import Decimal, ROUND_HALF_UP
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
@@ -799,7 +800,8 @@ def generate_forecasts(body: ForecastRequest, db: Session = Depends(get_db), _: 
     generated = []
     for product in products:
         generated.extend(forecast_product(db, product, body.horizon_days))
-    return {"generated": len(generated), "horizon_days": body.horizon_days, "model": "seasonal_baseline"}
+    models = sorted({row.model_name for row in generated})
+    return {"generated": len(generated), "horizon_days": body.horizon_days, "models": models}
 
 
 @api.get("/forecasts", tags=["forecasts"])
@@ -836,7 +838,26 @@ def dashboard(start: date | None = None, end: date | None = None, category_id: i
     sales_query = db.query(Sale).filter(Sale.date >= start, Sale.date <= end)
     if ids: sales_query = sales_query.filter(Sale.product_id.in_(ids))
     revenue = float(sales_query.with_entities(func.coalesce(func.sum(Sale.revenue), 0)).scalar())
-    expected = sum(forecast_sum(db, p, 7) for p in products)
+    forecast_end = date.today() + timedelta(days=7)
+    forecast_totals = dict(db.query(
+        Forecast.product_id, func.sum(Forecast.predicted_quantity)
+    ).filter(
+        Forecast.product_id.in_(ids) if ids else False,
+        Forecast.forecast_date > date.today(),
+        Forecast.forecast_date <= forecast_end,
+    ).group_by(Forecast.product_id).all())
+    recent_sales = dict(db.query(
+        Sale.product_id, func.sum(Sale.quantity_sold)
+    ).filter(
+        Sale.product_id.in_(ids) if ids else False,
+        Sale.date >= date.today() - timedelta(days=28),
+        Sale.date <= date.today(),
+    ).group_by(Sale.product_id).all())
+    expected = ceil(sum(
+        float(forecast_totals[product_id]) if product_id in forecast_totals
+        else float(recent_sales.get(product_id, 0) or 0) / 4
+        for product_id in ids
+    ))
     wastes = db.query(WastePrediction).filter(WastePrediction.calculated_for == date.today(), WastePrediction.product_id.in_(ids) if ids else False).all()
     reorders = db.query(ReorderRecommendation).filter(ReorderRecommendation.status == "draft", ReorderRecommendation.product_id.in_(ids) if ids else False).count()
     trend = db.query(Sale.date, func.sum(Sale.revenue).label("revenue"), func.sum(Sale.quantity_sold).label("units")).filter(Sale.date >= start, Sale.date <= end).group_by(Sale.date).order_by(Sale.date).all()
@@ -1005,7 +1026,14 @@ def trigger_model_training(db: Session = Depends(get_db), user: User = Depends(r
         raise HTTPException(500, "Could not load ML training module")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    results = module.train()
+    from ..config import get_settings
+    business_id = user.business_id
+    if business_id is None:
+        business_id = db.query(Product.business_id).filter(Product.sku.like("SKU-%")).first()
+        business_id = business_id[0] if business_id else None
+    if business_id is None:
+        raise HTTPException(422, "No imported supermarket sales dataset is available for training")
+    results = module.train(get_settings().database_url, business_id=business_id, sku_prefix="SKU-")
     audit(db, user, "train_models", "model_runs", "batch", {"models_count": len(results)})
     return {"message": "Models trained and evaluated successfully", "results": results}
 

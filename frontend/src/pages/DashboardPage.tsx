@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
-import { CartesianGrid, Legend, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { CartesianGrid, Cell, Legend, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { AlertTriangle, Calendar, Filter, IndianRupee, PackageCheck, Plus, RefreshCw, ShoppingBag } from 'lucide-react'
 import { api } from '../lib/api'
 import type { Dashboard } from '../types'
 import type { PageKey } from '../components/Layout'
 
 type Category = { id: number; name: string }
+
+const categoryChartColors = ['#16816b', '#e49a3a', '#4f8291', '#8a6b55', '#65a276', '#c66550', '#7287bd', '#b586bd']
 
 export default function DashboardPage({ onNavigate }: { onNavigate?: (page: PageKey) => void }) {
   const [data, setData] = useState<Dashboard | null>(null)
@@ -218,10 +220,12 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: Page
                 nameKey="name"
                 innerRadius={55}
                 outerRadius={85}
-                fill="#0f766e"
-                label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-                fontSize={11}
-              />
+                paddingAngle={2}
+              >
+                {data.category_sales.map((entry, index) => (
+                  <Cell key={entry.name} fill={categoryChartColors[index % categoryChartColors.length]} />
+                ))}
+              </Pie>
               <Tooltip formatter={(val: number) => `₹${val.toLocaleString()}`} />
             </PieChart>
           </ResponsiveContainer>

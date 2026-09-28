@@ -59,7 +59,7 @@ const titles: Record<string, { title: string; subtitle: string }> = {
   suppliers: { title: 'Supplier Directory', subtitle: 'Configured lead times, minimum order quantities and reliability scores.' },
   analytics: { title: 'Analytics & What-If Simulation', subtitle: 'Supplier performance benchmarks and dynamic scenario stress testing.' },
   knowledge: { title: 'RAG Knowledge Base', subtitle: 'Standard operating procedures and policies cited by the conversational chatbot.' },
-  models: { title: 'ML Model Performance & Evaluation', subtitle: 'Chronological holdout evaluation comparing Baseline, Random Forest and XGBoost.' },
+  models: { title: 'ML Model Performance & Evaluation', subtitle: 'SKU-aware forecasts scored on a rolling, chronological 7-day holdout.' },
   users: { title: 'User & Role Management', subtitle: 'Role-based access control (Admin, Manager, Staff) enforced by backend.' },
   settings: { title: 'System Architecture & Configuration', subtitle: 'Operational settings, model parameters, and database connectivity.' },
 }
@@ -637,19 +637,23 @@ export default function DataPage({ kind, currentUser }: { kind: string; currentU
       {/* MODEL PERFORMANCE COMPARISON CARDS */}
       {kind === 'models' && items.length > 0 && (
         <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1rem', marginBottom: '1.25rem' }}>
-          {['xgboost', 'random_forest', 'seasonal_baseline'].map(mName => {
+          {['xgboost_recursive_7d', 'seasonal_naive_7d'].map(mName => {
             const best = items.find(it => String(it.model_name).toLowerCase() === mName)
             if (!best) return null
+            const winner = items
+              .filter(it => ['xgboost_recursive_7d', 'seasonal_naive_7d'].includes(String(it.model_name).toLowerCase()))
+              .reduce<Item | null>((top, row) => !top || Number(row.mae) < Number(top.mae) ? row : top, null)
+            const isWinner = winner === best
             return (
-              <div key={mName} className="panel" style={{ borderTop: mName === 'xgboost' ? '3px solid #0f766e' : '3px solid #64748b' }}>
+              <div key={mName} className="panel" style={{ borderTop: isWinner ? '3px solid #0f766e' : '3px solid #64748b' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                  <strong style={{ textTransform: 'capitalize', fontSize: 14 }}>{mName.replace('_', ' ')}</strong>
-                  {mName === 'xgboost' && <span style={{ fontSize: 11, background: '#dcfce7', color: '#15803d', padding: '2px 6px', borderRadius: 4, fontWeight: 600 }}>Top Accuracy</span>}
+                  <strong style={{ textTransform: 'capitalize', fontSize: 14 }}>{mName === 'xgboost_recursive_7d' ? 'XGBoost recursive · 7 days' : 'Seasonal naive · 7 days'}</strong>
+                  {isWinner && <span style={{ fontSize: 11, background: '#dcfce7', color: '#15803d', padding: '2px 6px', borderRadius: 4, fontWeight: 600 }}>Lowest MAE</span>}
                 </div>
                 <div style={{ fontSize: 13, display: 'flex', flexDirection: 'column', gap: 4, color: '#475569' }}>
                   <div>MAE: <strong>{Number(best.mae).toFixed(3)}</strong> (Mean Abs Error)</div>
                   <div>RMSE: <strong>{Number(best.rmse).toFixed(3)}</strong></div>
-                  <div>MAPE: <strong>{Number(best.mape).toFixed(1)}%</strong></div>
+                  <div>MAPE on nonzero days: <strong>{Number(best.mape).toFixed(1)}%</strong></div>
                   <div>R² Score: <strong style={{ color: '#0f766e' }}>{(Number(best.r2) * 100).toFixed(1)}%</strong></div>
                 </div>
               </div>

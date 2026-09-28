@@ -2,7 +2,10 @@
 __pycache__/
 *.py[cod]
 backend/inventory.db
+backend/inventory_demo.db
+backend/indian_supermarket.db
 node_modules/
 frontend/dist/
 .env
 data/benchmark_results.json
+ml/artifacts/
