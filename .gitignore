@@ -9,3 +9,6 @@ frontend/dist/
 .env
 data/benchmark_results.json
 ml/artifacts/
+*.log
+.DS_Store
+Thumbs.db

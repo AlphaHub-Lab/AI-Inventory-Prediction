@@ -1,135 +1,586 @@
-# Multi-store inventory database (Supabase PostgreSQL)
+# Multi-Store Inventory Database — Supabase PostgreSQL
 
-This database layer adds eight logical catalogs in one Supabase database: `grocery_master/local`, `medical_master/local`, `food_master/local`, and `stationery_master/local`. It is additive and does not modify the existing FastAPI application's `public.products` tables.
+> Production-grade database architecture for a multi-store inventory and business management platform
+> supporting **Grocery**, **Medical**, **Food**, and **Stationery** stores.
 
-## Architecture
+---
 
-```text
-Supabase PostgreSQL
-├── grocery_master ── catalog, suppliers, product_suppliers
-├── grocery_local  ── store inventory, batches, transactions, POs
-├── medical_master ── catalog + medical_product_details
-├── medical_local  ── store inventory + medical_batch_details
-├── food_master    ── catalog + food_product_details
-├── food_local     ── store inventory + food_batch_details
-├── stationery_master ─ catalog + stationery_product_details
-└── stationery_local  ─ store inventory, batches, transactions, POs
+## Table of Contents
 
-public.inventory_stores ──< public.inventory_store_memberships >── auth.users
+- [Architecture Overview](#architecture-overview)
+- [Schema Map](#schema-map)
+- [Setup Instructions](#setup-instructions)
+- [Migration Files](#migration-files)
+- [Core Tables](#core-tables)
+- [Business Logic Functions](#business-logic-functions)
+- [Search Architecture](#search-architecture)
+- [Purchase Order Workflow](#purchase-order-workflow)
+- [Master → Local Import](#master--local-import)
+- [Inventory Transactions](#inventory-transactions)
+- [Expiry Management](#expiry-management)
+- [Waste Management](#waste-management)
+- [Row Level Security (RLS)](#row-level-security)
+- [Seed Data](#seed-data)
+- [Example Queries](#example-queries)
+- [API Mapping](#api-mapping)
+- [Business Rules](#business-rules)
+- [AI/Analytics Compatibility](#aianalytics-compatibility)
+- [Assumptions & Limitations](#assumptions--limitations)
+
+---
+
+## Architecture Overview
+
+```
+                    SUPABASE POSTGRESQL (single database)
+                           │
+        ┌──────────────────┼──────────────────┐
+        │                  │                  │
+     GROCERY            MEDICAL             FOOD
+        │                  │                  │
+   ┌────┴────┐        ┌────┴────┐        ┌────┴────┐
+   │         │        │         │        │         │
+ LOCAL     MASTER    LOCAL     MASTER    LOCAL    MASTER
+   │         │        │         │        │         │
+   └────┬────┘        └────┬────┘        └────┬────┘
+        │                  │                  │
+        └──────────────────┼──────────────────┘
+                           │
+                     STATIONERY
+                           │
+                      ┌────┴────┐
+                      │         │
+                    LOCAL     MASTER
+
++ public schema:
+  ├── stores
+  ├── store_memberships
+  └── audit_log
 ```
 
-Each local inventory item refers to its corresponding master product. Catalog records can exist without any local inventory row. A local item is unique by `(store_id, master_product_id)` and SKU. Batch quantities carry expiry/manufacturing dates; `inventory_stock` aggregates the batches. Purchase order lines track ordered and received quantities. Every receipt writes an immutable stock transaction.
+Eight logical databases are implemented as **PostgreSQL schemas** inside one Supabase database:
 
-## Migrations and seeding
+| Schema | Purpose |
+|---|---|
+| `grocery_master` | Global grocery product catalog |
+| `grocery_local` | Per-store grocery inventory, POs, transactions |
+| `medical_master` | Global pharmacy product catalog + medical details |
+| `medical_local` | Per-store pharmacy inventory + batch medical details |
+| `food_master` | Global food product catalog + food details |
+| `food_local` | Per-store food inventory + batch food details |
+| `stationery_master` | Global stationery product catalog + stationery details |
+| `stationery_local` | Per-store stationery inventory |
 
-Apply in numeric order from Supabase SQL Editor or `psql` using a trusted operator connection:
+---
 
-1. `database/migrations/001_store_memberships.sql`
-2. `database/migrations/002_logical_store_schemas.sql`
-3. `database/migrations/003_purchase_receiving.sql`
-4. Optional demo catalog: `database/seeds/001_demo_catalog.sql`
+## Schema Map
 
-The migration scripts are additive and use `CREATE ... IF NOT EXISTS` for the schemas and base membership objects. Do not run against production without first reviewing the SQL and taking the normal database backup. No destructive statements are included. Rerunning migration 002/003 is not guaranteed because named table constraints/policies are deliberately migration-managed; use Supabase migration history for repeatable deployment. Seed inserts are idempotent by SKU.
+```
+public
+├── stores                    — Registered businesses/shops
+├── store_memberships         — User ↔ Store authorization (RLS boundary)
+└── audit_log                 — System-wide audit trail
 
-Provision each store in `public.inventory_stores` and assign its owner/staff in `public.inventory_store_memberships` from a trusted backend using a service role. Never expose the service-role key in the browser. Supabase API settings must expose the eight schemas if clients call them directly; the preferred setup is a backend API using authenticated user JWTs. Grant/RLS policies are provided for authenticated roles. Master catalog rows are readable to authenticated users; catalog writes belong to trusted catalog administrators.
+{type}_master (grocery, medical, food, stationery)
+├── suppliers                 — Wholesaler directory
+├── products                  — Product catalog (SKU, barcode, pricing, GST)
+├── product_suppliers         — M:N product ↔ supplier mapping
+├── medical_product_details   — (medical only) Generic name, dosage, strength
+├── food_product_details      — (food only) Food type, storage, best-before
+└── stationery_product_details — (stationery only) Color, size, material
 
-## Environment
+{type}_local
+├── suppliers                 — Store-scoped suppliers (with store_id)
+├── inventory_items           — Per-store products (linked to master_product_id)
+├── inventory_batches         — Batch-level quantities + expiry dates
+├── inventory_stock           — VIEW: aggregated current_stock, available_stock
+├── inventory_transactions    — Immutable stock change history
+├── purchase_orders           — PO headers with lifecycle status
+├── purchase_order_items      — PO line items with received tracking
+├── waste_records             — Waste/spoilage/damage records
+├── medical_batch_details     — (medical only) Per-batch regulatory info
+├── food_batch_details        — (food only) Per-batch best-before, storage
+├── expiring_batches          — VIEW: batches by expiry urgency
+└── low_stock_items           — VIEW: items at/below reorder level
+```
 
-Copy `.env.example` to `.env`, set `DATABASE_URL` to the Supabase connection string from your secret manager/dashboard and keep `.env` out of Git. The supplied credential is not copied into the repository. Use Supabase's pooled connection endpoint for serverless workloads where appropriate. Rotate any credential that has been pasted into an untrusted location. Use `postgresql+psycopg://...` for SQLAlchemy.
+---
 
-## Core structures
+## Setup Instructions
 
-All four master schemas have:
+### Prerequisites
 
-- `suppliers`: wholesaler identity/contact and payment details.
-- `products`: UUID PK, unique SKU, barcode, product naming/category, unit/pack, MRP/prices/GST, default supplier, active flag and timestamps.
-- `product_suppliers`: many-to-many supplier offers, cost, supplier SKU, lead time and preferred flag.
+- Supabase project (or any PostgreSQL 14+ instance)
+- `psycopg2-binary` Python package (for the migration runner)
+- Or access to the Supabase SQL Editor
 
-Each local schema has:
+### Option 1: Migration Runner Script
 
-- `suppliers`: store-scoped wholesaler records.
-- `products`: local schema catalog metadata (catalog access is normally through the master schema).
-- `inventory_items`: store-scoped product and pricing/reorder/location settings; optional link to master product.
-- `inventory_batches`: on-hand batch quantity and dates.
-- `inventory_stock`: aggregate current and available stock view.
-- `inventory_transactions`: quantity delta and before/after audit history.
-- `purchase_orders`, `purchase_order_items`: full status lifecycle and partial receiving quantities.
-- Medical batch details (storage/regulatory attributes entered by the business); food batch details (best-before/storage attributes).
+```bash
+# 1. Install dependency
+pip install psycopg2-binary
 
-RLS policies scope local rows to a `store_id` membership for `auth.uid()`. The API must still enforce role/status transitions and ensure business flows use a signed-in user's JWT. Backend service-role operations bypass RLS and must perform explicit store authorization. Expired batches are excluded by the audited FEFO sale RPC; the database does not encode jurisdictional medicine compliance rules.
+# 2. Copy and configure environment
+cp .env.example .env
+# Edit .env and set DATABASE_URL
 
-## Typical flow
+# 3. Run migrations only
+python database/run_migrations.py
 
-1. Search local `*_local.inventory_stock` by name/SKU/barcode. If absent, search `*_master.products` and `product_suppliers`.
-2. Create one local `inventory_items` row linked to the master UUID (upsert on `(store_id, master_product_id)`), and create a PO plus PO line in one transaction.
-3. On receipt, call `schema.receive_purchase_order(order_id, line_id, quantity, batch, mfg_date, expiry_date, location)`. The security-definer routine checks the caller membership, locks the PO and line, rejects over-receipt/invalid status, increments/creates the batch, updates PO lifecycle and writes a `PURCHASE` transaction atomically.
-4. Sales should call `schema.sell_stock(store_id,item_id,quantity,note)`. It locks the item, allocates FEFO from non-expired batches, refuses insufficient/expired stock, and records stock deltas. Returns, damage, expiry write-offs and adjustments must update batches and append corresponding transaction rows in the same database transaction. Never directly edit batch quantity outside a controlled API/RPC.
+# 4. Run migrations + seed data
+python database/run_migrations.py --seed
 
-## Example SQL
+# 5. Preview what would run
+python database/run_migrations.py --dry-run --seed
+```
 
-Replace `:store_id`, `:query`, and IDs with bound parameters from your application. `:query` examples are pseudocode placeholders for prepared statements.
+### Option 2: Supabase SQL Editor
+
+Run each file in order from the Supabase Dashboard → SQL Editor:
+
+1. `database/migrations/001_create_schemas.sql`
+2. `database/migrations/002_create_suppliers.sql`
+3. `database/migrations/003_create_master_products.sql`
+4. `database/migrations/004_create_local_inventory.sql`
+5. `database/migrations/005_create_inventory_transactions.sql`
+6. `database/migrations/006_create_purchase_orders.sql`
+7. `database/migrations/007_create_waste_management.sql`
+8. `database/migrations/008_create_functions.sql`
+9. `database/migrations/009_create_search_functions.sql`
+10. `database/migrations/010_enterprise_standards.sql`
+
+Then optionally run seed data:
+
+1. `database/seeds/001_seed_grocery.sql`
+2. `database/seeds/002_seed_medical.sql`
+3. `database/seeds/003_seed_food.sql`
+4. `database/seeds/004_seed_stationery.sql`
+
+### Option 3: psql CLI
+
+```bash
+psql "$DATABASE_URL" -f database/migrations/001_create_schemas.sql
+psql "$DATABASE_URL" -f database/migrations/002_create_suppliers.sql
+# ... (continue in order)
+```
+
+### Post-Setup: Create a Store
 
 ```sql
--- Local stock search
-SELECT sku, product_name, current_stock, available_stock, selling_price, stock_status
-FROM grocery_local.inventory_stock
-WHERE store_id = :store_id AND product_name ILIKE '%' || :query || '%'
-ORDER BY product_name LIMIT 50;
+-- Create a store
+INSERT INTO public.stores (store_name, business_type, address, city, state, pincode)
+VALUES ('My Kirana Shop', 'grocery', '123 Main Road', 'Mumbai', 'Maharashtra', '400001')
+RETURNING id;
 
--- Master search by name, SKU or barcode
-SELECT id, sku, barcode, product_name, brand, category, pack_size, mrp, supplier_id
-FROM grocery_master.products
-WHERE is_active AND (product_name ILIKE '%' || :query || '%' OR sku ILIKE :query || '%'
-  OR barcode = :query OR to_tsvector('simple',coalesce(product_name,'')||' '||coalesce(brand,'')||' '||coalesce(category,'')) @@ plainto_tsquery('simple',:query))
-ORDER BY product_name LIMIT 50;
-
--- Catalog entries not yet in a store's local assortment
-SELECT m.* FROM grocery_master.products m
-WHERE m.is_active AND NOT EXISTS (
- SELECT 1 FROM grocery_local.inventory_items i WHERE i.store_id=:store_id AND i.master_product_id=m.id);
-
--- Create or reuse local item, then create a pending purchase order + line in one transaction
-INSERT INTO grocery_local.inventory_items(store_id,master_product_id,sku,barcode,product_name,category,
- cost_price,selling_price,mrp,supplier_id,stock_status)
-SELECT :store_id,p.id,p.sku,p.barcode,p.product_name,p.category,:cost,:price,p.mrp,:supplier,'OUT_OF_STOCK'
-FROM grocery_master.products p WHERE p.id=:master_product_id
-ON CONFLICT(store_id,master_product_id) DO UPDATE SET updated_at=now() RETURNING id;
-INSERT INTO grocery_local.purchase_orders(store_id,supplier_id,status,expected_delivery_date,created_by)
-VALUES(:store_id,:supplier,'PENDING',:expected_date,auth.uid()) RETURNING id;
-INSERT INTO grocery_local.purchase_order_items(purchase_order_id,item_id,quantity_ordered,unit_cost)
-VALUES(:po_id,:item_id,20,250.00);
-UPDATE grocery_local.purchase_orders po SET total_amount=(SELECT sum(line_total) FROM grocery_local.purchase_order_items WHERE purchase_order_id=po.id)
-WHERE po.id=:po_id;
-
--- Atomic receipt (20 units, batch and expiry tracked)
-SELECT grocery_local.receive_purchase_order(:po_id,:line_id,20,'LOT-2026-09',CURRENT_DATE,CURRENT_DATE+365,'A-01');
-
--- Sell only available, non-expired stock (FEFO); all batch deductions are audited
-SELECT grocery_local.sell_stock(:store_id,:item_id,2,'Invoice INV-1001');
-
--- Low stock, expiring batches, and SKU history
-SELECT * FROM grocery_local.inventory_stock WHERE store_id=:store_id AND current_stock <= reorder_level;
-SELECT i.sku,i.product_name,b.batch_number,b.quantity,b.expiry_date FROM grocery_local.inventory_items i
-JOIN grocery_local.inventory_batches b ON b.item_id=i.id
-WHERE i.store_id=:store_id AND b.quantity>0 AND b.expiry_date <= CURRENT_DATE + interval '30 days';
-SELECT t.* FROM grocery_local.inventory_transactions t JOIN grocery_local.inventory_items i ON i.id=t.item_id
-WHERE t.store_id=:store_id AND i.sku=:sku ORDER BY t.created_at DESC;
+-- Assign a user to the store (use the store ID from above)
+INSERT INTO public.store_memberships (store_id, user_id, role)
+VALUES ('<store_id>', '<auth_user_id>', 'owner');
 ```
 
-For other business types substitute the schema prefix. Use bound parameters rather than interpolating input. The receive function takes line UUID as its second argument.
+---
 
-## API mapping
+## Migration Files
 
-Suggested backend endpoints: `GET /products/local`, `/products/master`, `/products/search`, `/products/{sku}`; `POST/GET /purchase-orders`, `GET /purchase-orders/{id}`, `POST /purchase-orders/{id}/receive`; `POST /inventory/adjust`; `GET /inventory/transactions`, `/inventory/low-stock`, `/inventory/expiring`, `/inventory/out-of-stock`. Determine the store from the authenticated membership, not a client-supplied store ID alone. Return no connection details/secrets.
+| File | Description |
+|---|---|
+| `001_create_schemas.sql` | Creates 8 schemas, `stores`, `store_memberships`, `audit_log`, business_type enum, RLS |
+| `002_create_suppliers.sql` | Creates `suppliers` table in all 8 schemas (local = store-scoped, master = catalog) |
+| `003_create_master_products.sql` | Creates `products`, `product_suppliers` in master schemas + type-specific extensions |
+| `004_create_local_inventory.sql` | Creates `inventory_items`, `inventory_batches`, `inventory_stock` view in local schemas |
+| `005_create_inventory_transactions.sql` | Creates immutable `inventory_transactions` tables |
+| `006_create_purchase_orders.sql` | Creates `purchase_orders` + `purchase_order_items` with full lifecycle |
+| `007_create_waste_management.sql` | Creates `waste_records` for spoilage/damage tracking |
+| `008_create_functions.sql` | Atomic business logic: receive_purchase_order, sell_stock, import_from_master, record_waste, adjust_stock |
+| `009_create_search_functions.sql` | Search functions, expiring_batches view, low_stock_items view |
 
-## Assumptions and boundaries
+---
 
-- Eight schemas are logical namespaces in one PostgreSQL database, not separate database instances.
-- `inventory_stores.store_type` enforces the four supported types; schema choice is fixed by the backend.
-- Batch rows are the source of truth for current stock. The view calculates `current_stock`; reserved stock is subtracted for availability.
-- Demo seed creates 100 sample catalog records per type. Medical entries are illustrative catalog labels only; they do not assert composition, prescription status, schedule, or clinical/regulatory facts.
-- RLS membership assignment and catalog/supplier maintenance are administrative operations. Ordinary authenticated clients have read-only batch/transaction access and use security-definer receive/sale RPCs that verify store membership; service-role calls bypass RLS and require application-side store authorization. Review grants and policies against the exact Supabase API exposure before production.
-- The migration revokes direct batch/transaction writes from authenticated clients. Trusted service-role or database-owner operations can still bypass audit workflows and must be tightly controlled.
+## Core Tables
 
+### Products (Master)
 
+```
+id, sku (UNIQUE), barcode, product_name, brand, category, subcategory,
+description, unit, pack_size, mrp, default_cost_price, default_selling_price,
+gst_percentage, supplier_id, is_active, created_at, updated_at
+```
 
+### Inventory Items (Local)
+
+```
+id, store_id, master_product_id (FK→master.products), sku, barcode,
+product_name, brand, category, subcategory, reserved_stock, reorder_level,
+minimum_stock, maximum_stock, cost_price, selling_price, mrp, gst_percentage,
+supplier_id, storage_location, stock_status, created_at, updated_at
+
+UNIQUE(store_id, sku), UNIQUE(store_id, master_product_id)
+```
+
+### Inventory Batches (Local)
+
+```
+id, item_id (FK→inventory_items), batch_number, manufacturing_date,
+expiry_date, quantity, created_at
+
+UNIQUE(item_id, batch_number, expiry_date)
+```
+
+**Key design**: `current_stock` is calculated by summing batch quantities, not stored as a single field. This enables precise batch-level expiry and FEFO tracking.
+
+---
+
+## Business Logic Functions
+
+All functions are `SECURITY DEFINER` with `SET search_path = pg_catalog, public` for safety. They verify store membership, use `FOR UPDATE` row locking, and write audit logs.
+
+| Function | Purpose |
+|---|---|
+| `{schema}.receive_purchase_order(...)` | Atomically receive stock from a PO line |
+| `{schema}.sell_stock(...)` | FEFO deduction from non-expired batches |
+| `{schema}.import_from_master(...)` | Add/update local inventory from master catalog |
+| `{schema}.record_waste(...)` | Write off waste with transaction record |
+| `{schema}.adjust_stock(...)` | Manual stock adjustment with audit trail |
+| `{schema}.search_local(...)` | Search store's local inventory |
+| `{schema}.search_catalog(...)` | Search master product catalog |
+
+---
+
+## Search Architecture
+
+```
+Seller searches "Parle biscuits"
+        │
+        ▼
+Step 1: Search LOCAL inventory
+        │
+   ┌────┴────┐
+   │         │
+  Found    Not Found
+   │         │
+   ▼         ▼
+Show stock  Step 2: Search MASTER catalog
+   │         │
+   │         ▼
+   │    Show matching products
+   │    (name, brand, SKU, category, pack size, MRP, supplier)
+   │         │
+   │         ▼
+   │    Import to Local / Create PO
+```
+
+**Search supports:** Exact SKU, barcode, product name (partial), brand, category, full-text search via GIN index.
+
+```sql
+-- Local search
+SELECT * FROM grocery_local.search_local(:store_id, 'Parle');
+
+-- Master search
+SELECT * FROM grocery_master.search_catalog('basmati rice');
+```
+
+---
+
+## Purchase Order Workflow
+
+```
+Seller searches → Not in Local → Found in Master
+        │
+        ▼
+Select product from Master
+        │
+        ▼
+Import to Local inventory (0 stock)
+        │
+        ▼
+Select supplier + enter quantity
+        │
+        ▼
+Create Purchase Order (PENDING)
+        │
+        ▼
+Supplier confirms → (CONFIRMED)
+        │
+        ▼
+Goods dispatched → (SHIPPED)
+        │
+        ▼
+Seller receives goods
+        │
+        ▼
+Call receive_purchase_order() → ATOMICALLY:
+  1. Verify PO status
+  2. Check quantity limits
+  3. Create/update batch
+  4. Update PO line (quantity_received)
+  5. Update PO status (RECEIVED or PARTIALLY_RECEIVED)
+  6. Update inventory item stock_status
+  7. Create inventory transaction
+  8. Write audit log
+        │
+        ▼
+Stock available for sale
+```
+
+**PO Status Lifecycle:**
+```
+DRAFT → PENDING → CONFIRMED → SHIPPED → RECEIVED
+                                      → PARTIALLY_RECEIVED
+Any state → CANCELLED
+```
+
+---
+
+## Master → Local Import
+
+```sql
+-- Import with initial stock
+SELECT grocery_local.import_from_master(
+  p_store_id           := :store_id,
+  p_master_product_id  := :master_product_id,
+  p_quantity           := 50,
+  p_cost_price         := 380.00,
+  p_selling_price      := 420.00,
+  p_batch_number       := 'LOT-2026-09',
+  p_expiry_date        := '2027-09-01'
+);
+```
+
+**Rules:**
+- If product already exists in local → **updates** (no duplicate)
+- If quantity > 0 → creates batch, creates transaction, updates stock status
+- If quantity = 0 → just adds to local catalog (OUT_OF_STOCK)
+
+---
+
+## Inventory Transactions
+
+Every stock change creates an immutable transaction record:
+
+| Type | When |
+|---|---|
+| `PURCHASE` | Stock received from PO or master import |
+| `SALE` | Stock sold (FEFO deduction) |
+| `RETURN` | Customer return |
+| `DAMAGE` | Damaged goods write-off |
+| `EXPIRED` | Expired goods write-off |
+| `ADJUSTMENT` | Manual stock count correction |
+| `TRANSFER_IN` | Stock transferred in from another location |
+| `TRANSFER_OUT` | Stock transferred out |
+
+Each record captures: `quantity_delta`, `previous_stock`, `new_stock`, `reference_id`, `created_by`.
+
+---
+
+## Expiry Management
+
+```sql
+-- View all expiring batches with urgency status
+SELECT * FROM grocery_local.expiring_batches
+WHERE store_id = :store_id;
+```
+
+| Status | Condition |
+|---|---|
+| `EXPIRED` | expiry_date < today |
+| `EXPIRING_TODAY` | expiry_date = today |
+| `EXPIRING_7_DAYS` | ≤ 7 days remaining |
+| `EXPIRING_30_DAYS` | ≤ 30 days remaining |
+| `EXPIRING_60_DAYS` | ≤ 60 days remaining |
+| `OK` | > 60 days remaining |
+
+**Medical products**: The `sell_stock()` function **refuses to sell expired batches**. It uses FEFO (First Expired, First Out) to deduct from earliest-expiring non-expired batches first.
+
+---
+
+## Waste Management
+
+```sql
+SELECT grocery_local.record_waste(
+  p_store_id := :store_id,
+  p_item_id  := :item_id,
+  p_quantity := 10,
+  p_reason   := 'EXPIRED',
+  p_batch_id := :batch_id,
+  p_notes    := 'Batch expired, removing from shelf'
+);
+```
+
+**Reasons:** `EXPIRED`, `DAMAGED`, `SPOILED`, `RETURNED`, `OTHER`
+
+Each waste record tracks `cost_loss` (quantity × cost_price) for analytics.
+
+---
+
+## Row Level Security
+
+| Table | Policy |
+|---|---|
+| `public.stores` | Users see only stores they belong to |
+| `public.store_memberships` | Users see only their own memberships |
+| `public.audit_log` | Users see audit entries for their stores |
+| `*_local.inventory_items` | Scoped by `store_id` membership |
+| `*_local.inventory_batches` | Scoped via parent item's store_id |
+| `*_local.inventory_transactions` | Scoped by `store_id` membership |
+| `*_local.purchase_orders` | Scoped by `store_id` membership |
+| `*_local.purchase_order_items` | Scoped via parent PO's store_id |
+| `*_local.suppliers` | Scoped by `store_id` membership |
+| `*_local.waste_records` | Scoped by `store_id` membership |
+| `*_master.products` | Read-only for authenticated (active products only) |
+| `*_master.suppliers` | Read-only for authenticated (active suppliers only) |
+
+**Seller A can ONLY access Store A's local inventory. Seller B cannot see Store A's data.**
+
+---
+
+## Seed Data
+
+| File | Store Type | Products |
+|---|---|---|
+| `001_seed_grocery.sql` | Grocery | 126 products (Staples, Spices, Snacks, Beverages, Dairy, Oil, Personal Care, Household, Sauces) |
+| `002_seed_medical.sql` | Medical | 110+ products (OTC, First Aid, Vitamins, Devices, Skin Care, Hygiene, Ayurvedic, Baby Care) |
+| `003_seed_food.sql` | Food | 115 products (Raw, Packaged, Ready-to-Eat, Frozen, Bakery, Beverages, Dairy, Produce, Meat) |
+| `004_seed_stationery.sql` | Stationery | 115 products (Writing, Paper/Notebooks, Files, Adhesives, Erasers, Office, Geometry, Art) |
+
+All products use **realistic Indian brands**: Amul, Tata, Parle, Haldiram, Everest, MDH, Classmate, Camlin, Faber-Castell, etc.
+
+Each store type includes 5 supplier records.
+
+> **Note:** Medical seed data is illustrative catalog information only. Prescription schedules, drug compositions, and regulatory classifications should not be used for actual pharmaceutical compliance.
+
+---
+
+## Example Queries
+
+See `database/queries/example_queries.sql` for complete working examples:
+
+1. Search local inventory (by name, SKU, barcode)
+2. Search master catalog (full-text)
+3. Find products missing from local
+4. Import product from master to local
+5. Create purchase order
+6. Receive stock (atomic)
+7. Sell stock (FEFO)
+8. Low stock report
+9. Expiring products report
+10. Inventory transaction history
+11. Out of stock report
+12. Stock adjustments
+13. Waste recording
+14. PO lifecycle queries
+15. Medical-specific queries
+16. Audit log queries
+17. AI/analytics-ready aggregation queries
+
+---
+
+## API Mapping
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/products/local` | GET | Search local inventory |
+| `/products/master` | GET | Search master catalog |
+| `/products/search` | GET | Unified search (local → master fallback) |
+| `/products/:sku` | GET | Get product by SKU |
+| `/purchase-orders` | POST | Create purchase order |
+| `/purchase-orders` | GET | List purchase orders |
+| `/purchase-orders/:id` | GET | Get PO details |
+| `/purchase-orders/:id/receive` | POST | Receive stock from PO |
+| `/inventory/adjust` | POST | Manual stock adjustment |
+| `/inventory/transactions` | GET | Transaction history |
+| `/inventory/low-stock` | GET | Low stock items |
+| `/inventory/expiring` | GET | Expiring batches |
+| `/inventory/out-of-stock` | GET | Out of stock items |
+
+---
+
+## Business Rules
+
+| # | Rule |
+|---|---|
+| 1 | A product can exist in Master without existing in Local |
+| 2 | A product cannot be sold from Local if available stock is zero |
+| 3 | Receiving stock increases Local inventory |
+| 4 | Receiving stock MUST create an inventory transaction |
+| 5 | Duplicate products must not be created in Local (UNIQUE on store_id + master_product_id) |
+| 6 | If a product already exists in Local, received stock increases quantity |
+| 7 | Medical products with expired batches must not be sold (enforced by sell_stock) |
+| 8 | Expiry tracked at batch level |
+| 9 | Every inventory modification is auditable (audit_log + inventory_transactions) |
+| 10 | Purchase orders maintain complete lifecycle |
+
+---
+
+## AI/Analytics Compatibility
+
+The schema stores clean historical data for ML consumption:
+
+| Use Case | Data Source |
+|---|---|
+| Demand forecasting | `inventory_transactions` (daily SALE aggregates) |
+| Reorder prediction | `inventory_stock` + transaction history |
+| Safety stock calculation | Transaction velocity + lead time data |
+| Expiry prediction | `inventory_batches.expiry_date` + sales velocity |
+| Waste prediction | `waste_records` (reason, quantity, cost_loss) |
+| Sales forecasting | Transaction history + seasonal patterns |
+| Supplier analysis | `purchase_orders` (delivery times, amounts) |
+| Inventory optimization | Stock levels + reorder_level + turnover |
+
+---
+
+## SKU System
+
+Store-specific prefixes ensure unique identification:
+
+```
+GRO-RICE-000001    (Grocery)
+MED-PARA-000001    (Medical)
+FOOD-MILK-000001   (Food)
+STA-PEN-000001     (Stationery)
+```
+
+---
+
+## Database Relationships
+
+```
+public.stores ←──── public.store_memberships ────→ auth.users
+      │
+      ├── {type}_local.inventory_items ────→ {type}_master.products
+      │         │
+      │         ├── inventory_batches
+      │         │         │
+      │         │         └── medical_batch_details (medical only)
+      │         │         └── food_batch_details (food only)
+      │         │
+      │         └── inventory_transactions
+      │
+      ├── {type}_local.purchase_orders
+      │         │
+      │         └── purchase_order_items ────→ inventory_items
+      │
+      ├── {type}_local.waste_records ────→ inventory_items
+      │
+      └── {type}_local.suppliers
+
+{type}_master.products
+      │
+      ├── product_suppliers ────→ suppliers
+      │
+      ├── medical_product_details (medical only)
+      ├── food_product_details (food only)
+      └── stationery_product_details (stationery only)
+```
+
+---
+
+## Assumptions & Limitations
+
+1. **Eight schemas are logical namespaces** in one PostgreSQL database, not separate database instances.
+2. **`store_type` in `public.stores`** maps to exactly one pair of schemas; the backend selects the correct schema based on the store's type.
+3. **Batch rows are the source of truth** for current stock. The `inventory_stock` view calculates `current_stock` by summing batches; `reserved_stock` is subtracted for availability.
+4. **Medical seed data is illustrative only** — it does not assert prescription status, drug schedules, or clinical/regulatory facts.
+5. **RLS membership assignment** is an administrative operation (service_role). Ordinary authenticated clients use SECURITY DEFINER RPCs.
+6. **Catalog/supplier maintenance** in master schemas requires service_role. Authenticated users have read-only access.
+7. **The sell_stock function** enforces FEFO and refuses expired batches but does not encode jurisdiction-specific medicine compliance rules.
+8. Migrations are designed for a **fresh Supabase PostgreSQL project**. Running against an existing production database requires careful review.
+9. The `auth.users` reference requires Supabase Auth to be configured.
