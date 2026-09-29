@@ -1060,11 +1060,17 @@ def system_info(user: User = Depends(get_current_user)):
 async def chat(request: Request, body: ChatRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     conversation = db.get(ChatbotConversation, body.conversation_id) if body.conversation_id else None
     if conversation and conversation.user_id != user.id: raise HTTPException(403, "Conversation belongs to another user")
+    active_business_id = user.business_id or db.info.get("business_id")
+    if not active_business_id:
+        first_biz = db.query(Business.id).filter(Business.is_active.is_(True)).first()
+        active_business_id = first_biz[0] if first_biz else 1
+    if "business_id" not in db.info or db.info.get("business_id") is None:
+        db.info["business_id"] = active_business_id
     if not conversation:
-        conversation = ChatbotConversation(user_id=user.id, title=body.message[:80]); db.add(conversation); db.flush()
+        conversation = ChatbotConversation(business_id=active_business_id, user_id=user.id, title=body.message[:80]); db.add(conversation); db.flush()
     response, intent, tool_data, citations = await chatbot_answer(db, body.message)
-    db.add(ChatbotMessage(conversation_id=conversation.id, role="user", content=body.message, intent=intent))
-    db.add(ChatbotMessage(conversation_id=conversation.id, role="assistant", content=response, intent=intent, citations=[{"title": c["title"], "section": c["section"]} for c in citations]))
+    db.add(ChatbotMessage(business_id=active_business_id, conversation_id=conversation.id, role="user", content=body.message, intent=intent))
+    db.add(ChatbotMessage(business_id=active_business_id, conversation_id=conversation.id, role="assistant", content=response, intent=intent, citations=[{"title": c["title"], "section": c["section"]} for c in citations]))
     db.commit()
     return {"conversation_id": conversation.id, "intent": intent, "response": response, "tool_data": tool_data, "citations": [{"title": c["title"], "section": c["section"]} for c in citations]}
 

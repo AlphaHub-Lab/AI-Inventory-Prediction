@@ -116,6 +116,11 @@ def main():
     print(" Press Ctrl+C at any time to stop both servers.\n")
 
     try:
+        webbrowser.open("http://localhost:5173")
+    except Exception:
+        pass
+
+    try:
         while True:
             time.sleep(1)
             # Check if any process terminated unexpectedly

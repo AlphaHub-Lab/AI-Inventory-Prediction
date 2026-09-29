@@ -20,7 +20,7 @@ def evaluate_expiry(db: Session, product: Product) -> ExpiryAlert | None:
         return None
     alert = db.query(ExpiryAlert).filter_by(product_id=product.id, expiry_date=product.expiry_date, status="open").first()
     if not alert:
-        alert = ExpiryAlert(product_id=product.id, severity=severity, expiry_date=product.expiry_date, recommendation=action)
+        alert = ExpiryAlert(business_id=product.business_id, product_id=product.id, severity=severity, expiry_date=product.expiry_date, recommendation=action)
         db.add(alert)
     return alert
 
@@ -42,7 +42,7 @@ def evaluate_waste(db: Session, product: Product) -> WastePrediction | None:
     if existing:
         existing.risk_level, existing.units_at_risk, existing.estimated_value, existing.recommendation = risk, at_risk, at_risk * float(product.price), action
         return existing
-    prediction = WastePrediction(product_id=product.id, risk_level=risk, units_at_risk=at_risk, estimated_value=at_risk * float(product.price), recommendation=action)
+    prediction = WastePrediction(business_id=product.business_id, product_id=product.id, risk_level=risk, units_at_risk=at_risk, estimated_value=at_risk * float(product.price), recommendation=action)
     db.add(prediction)
     return prediction
 
@@ -56,9 +56,10 @@ def build_reorder(db: Session, product: Product) -> ReorderRecommendation:
     if row:
         row.forecast_demand, row.recommended_quantity, row.explanation = lead_demand, quantity, explanation
         return row
-    row = ReorderRecommendation(product_id=product.id, forecast_demand=lead_demand, recommended_quantity=quantity, explanation=explanation)
+    row = ReorderRecommendation(business_id=product.business_id, product_id=product.id, forecast_demand=lead_demand, recommended_quantity=quantity, explanation=explanation)
     db.add(row)
     return row
+
 
 
 def refresh_operational_insights(db: Session) -> None:

@@ -4,8 +4,9 @@ import { api, setSession } from '../lib/api'
 import type { User } from '../types'
 
 export default function LoginPage({ onLogin, onCreateAccount }: { onLogin: (user: User) => void; onCreateAccount?: () => void }) {
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
+  const [email, setEmail] = useState('admin@inventory.example.com')
+  const [password, setPassword] = useState('Admin123!')
+
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
