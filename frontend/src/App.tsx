@@ -11,11 +11,13 @@ import ChatPage from './pages/ChatPage'
 import DataInputPage from './pages/DataInputPage'
 import AdminPage from './pages/AdminPage'
 import CheckoutPage from './pages/CheckoutPage'
+import ReorderPage from './pages/ReorderPage'
+import ReceiptsPage from './pages/ReceiptsPage'
 
 import ErrorBoundary from './components/ErrorBoundary'
 
 const VALID_PAGES: PageKey[] = [
-  'dashboard', 'data-input', 'products', 'inventory', 'checkout', 'sales', 'forecasts',
+  'dashboard', 'data-input', 'products', 'inventory', 'checkout', 'sales', 'receipts', 'forecasts',
   'waste', 'reorders', 'orders', 'suppliers', 'analytics',
   'chat', 'knowledge', 'models', 'admin', 'users', 'settings'
 ]
@@ -73,6 +75,8 @@ function App() {
   else if (activePage === 'data-input') view = <DataInputPage/>
   else if (activePage === 'products') view = <ProductsPage/>
   else if (activePage === 'checkout') view = <CheckoutPage/>
+  else if (activePage === 'reorders') view = <ReorderPage currentUser={user}/>
+  else if (activePage === 'receipts') view = <ReceiptsPage currentUser={user}/>
   else if (activePage === 'chat') view = <ChatPage/>
   else view = <DataPage kind={activePage} currentUser={user}/>
 

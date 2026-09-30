@@ -8,29 +8,66 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from .config import get_settings
 from .routers.api import api
+from .routers.receipts_router import router as receipts_router
+from .routers.reorders_router import router as reorders_router
+from .routers.catalog_router import router as catalog_router
+from .routers.associate_management_router import router as associate_router
+from .routers.admin_management_router import router as admin_system_router
 from .rate_limit import limiter
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name, version="1.0.0", description="Live inventory intelligence, forecasting, waste prevention, reordering, and grounded decision support.")
+app = FastAPI(
+    title=settings.app_name,
+    version="2.0.0",
+    description="Multi-Tenant AI-Powered Inventory Management System with Dynamic PostgreSQL Routing, OCR Receipt Ingestion, Reorder Workflow, and Multi-Level RBAC."
+)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list, allow_credentials=True, allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Authorization", "Content-Type"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origin_list,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Cookie"],
+)
 
 
 @app.on_event("startup")
 def apply_schema_migrations() -> None:
-    config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
-    command.upgrade(config, "head")
+    import os
+    if os.getenv("SKIP_ALEMBIC_STARTUP") == "1":
+        return
+    try:
+        config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+        command.upgrade(config, "head")
+    except Exception as e:
+        print(f"Warning on startup migration: {e}")
 
 
 @app.exception_handler(HTTPException)
 async def http_error(_: Request, exc: HTTPException):
-    return JSONResponse(status_code=exc.status_code, content={"error": {"message": str(exc.detail), "status": exc.status_code}})
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": {"message": str(exc.detail), "status": exc.status_code}}
+    )
 
 
 @app.get("/health", tags=["system"])
 def health():
-    return {"status": "ok", "service": settings.app_name, "environment": settings.environment}
+    return {
+        "status": "ok",
+        "service": settings.app_name,
+        "environment": settings.environment,
+        "database": "Supabase PostgreSQL Multi-Tenant",
+        "roles": ["admin", "business_owner", "associate"],
+        "business_types": ["medical", "grocery", "restaurant", "stationery", "dairy"]
+    }
 
 
+# Include sub-routers first so more specific paths match
+app.include_router(receipts_router)
+app.include_router(reorders_router)
+app.include_router(catalog_router)
+app.include_router(associate_router)
+app.include_router(admin_system_router)
 app.include_router(api)
