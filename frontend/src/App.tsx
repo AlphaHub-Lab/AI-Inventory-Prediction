@@ -9,7 +9,6 @@ import ProductsPage from './pages/ProductsPage'
 import DataPage from './pages/DataPage'
 import ChatPage from './pages/ChatPage'
 import DataInputPage from './pages/DataInputPage'
-import SignupPage from './pages/SignupPage'
 import AdminPage from './pages/AdminPage'
 import CheckoutPage from './pages/CheckoutPage'
 
@@ -23,7 +22,6 @@ const VALID_PAGES: PageKey[] = [
 
 function App() {
   const [user, setUser] = useState<User | null>(null)
-  const [authPage, setAuthPage] = useState<'login' | 'signup'>('login')
   const [page, setPageState] = useState<PageKey>(() => {
     const hash = window.location.hash.replace(/^#\/?/, '') as PageKey
     return VALID_PAGES.includes(hash) ? hash : 'dashboard'
@@ -55,6 +53,7 @@ function App() {
   }, [])
 
   const logout = () => {
+    void api('/api/auth/logout', { method: 'POST' }).catch(() => {})
     clearSession()
     sessionStorage.removeItem('inventory_checkout_cart')
     setUser(null)
@@ -62,9 +61,7 @@ function App() {
   }
 
   if (checking) return <div className="boot-screen">Connecting securely to Stockwise AI…</div>
-  if (!user) return authPage === 'signup'
-    ? <SignupPage onSignup={setUser} onBack={() => setAuthPage('login')}/>
-    : <LoginPage onLogin={setUser} onCreateAccount={() => setAuthPage('signup')}/>
+  if (!user) return <LoginPage onLogin={setUser}/>
 
   const activePage = user.role === 'admin'
     ? (page === 'admin' ? 'admin' : 'dashboard')

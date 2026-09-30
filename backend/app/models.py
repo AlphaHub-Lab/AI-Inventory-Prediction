@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import List, Optional
 from sqlalchemy import event
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, Float, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, Session, mapped_column, relationship, with_loader_criteria
 from .db import Base
 
@@ -13,8 +13,12 @@ class TimestampMixin:
 
 class Business(Base):
     __tablename__ = "businesses"
+    __table_args__ = (CheckConstraint("business_type IN ('medical', 'grocery', 'restaurant', 'stationery', 'dairy')", name="ck_businesses_supported_type"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(180), index=True)
+    business_type: Mapped[str] = mapped_column(String(30), default="grocery", index=True)
+    master_database_name: Mapped[str] = mapped_column(String(63), default="master_grocery")
+    local_database_name: Mapped[Optional[str]] = mapped_column(String(63), nullable=True, unique=True)
     owner_email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -31,19 +35,44 @@ class Role(Base):
     description: Mapped[str] = mapped_column(String(250), default="")
 
 
+class UserPermission(Base):
+    """Explicit operational permissions granted to an associate by their owner."""
+    __tablename__ = "user_permissions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    permission: Mapped[str] = mapped_column(String(80), index=True)
+    granted_by: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    __table_args__ = (UniqueConstraint("user_id", "permission", name="uq_user_permission"),)
+
+
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
 class User(BusinessScoped, Base, TimestampMixin):
     __tablename__ = "users"
+    __table_args__ = (CheckConstraint("role IN ('admin', 'business_owner', 'associate')", name="ck_users_supported_role"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     full_name: Mapped[str] = mapped_column(String(120))
     password_hash: Mapped[str] = mapped_column(String(255))
-    role: Mapped[str] = mapped_column(String(40), default="staff", index=True)
+    role: Mapped[str] = mapped_column(String(40), default="associate", index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     business: Mapped[Optional[Business]] = relationship()
 
     @property
     def business_name(self) -> str | None:
         return self.business.name if self.business else None
+
+    @property
+    def business_type(self) -> str | None:
+        return self.business.business_type if self.business else None
 
 
 class Category(BusinessScoped, Base):

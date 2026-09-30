@@ -43,16 +43,17 @@ def seed() -> None:
             print("Database already seeded; no changes made.")
             return
         randomizer = random.Random(20260907)
-        business = Business(name="Stockwise Demo Business", owner_email="manager@inventory.example.com")
+        business = Business(name="Stockwise Demo Business", owner_email="manager@inventory.example.com", business_type="grocery", master_database_name="master_grocery")
         db.add(business)
         db.flush()
+        business.local_database_name = f"local_business_{business.id}"
         db.info["business_id"] = business.id
-        for role in ["admin", "business_owner", "manager", "staff"]:
+        for role in ["admin", "business_owner", "associate"]:
             db.add(Role(name=role, description=f"{role.title()} application role"))
         db.add_all([
             User(email="admin@inventory.example.com", full_name="Avery Admin", password_hash=hash_password("Admin123!"), role="admin"),
             User(email="manager@inventory.example.com", full_name="Morgan Manager", password_hash=hash_password("Manager123!"), role="business_owner", business_id=business.id),
-            User(email="staff@inventory.example.com", full_name="Sam Staff", password_hash=hash_password("Staff123!"), role="staff", business_id=business.id),
+            User(email="staff@inventory.example.com", full_name="Sam Staff", password_hash=hash_password("Staff123!"), role="associate", business_id=business.id),
         ])
         categories = {name: Category(name=name) for name in CATEGORIES}
         db.add_all(categories.values())

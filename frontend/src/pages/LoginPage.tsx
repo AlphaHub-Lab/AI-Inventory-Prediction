@@ -3,9 +3,9 @@ import { Eye, EyeOff, LockKeyhole, ShieldCheck } from 'lucide-react'
 import { api, setSession } from '../lib/api'
 import type { User } from '../types'
 
-export default function LoginPage({ onLogin, onCreateAccount }: { onLogin: (user: User) => void; onCreateAccount?: () => void }) {
-  const [email, setEmail] = useState('admin@inventory.example.com')
-  const [password, setPassword] = useState('Admin123!')
+export default function LoginPage({ onLogin }: { onLogin: (user: User) => void }) {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
 
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
@@ -55,7 +55,7 @@ export default function LoginPage({ onLogin, onCreateAccount }: { onLogin: (user
         </div>
         {error && <p className="form-error" role="alert">{error}</p>}
         <button className="primary-button login-submit" disabled={busy}>{busy ? 'Signing in…' : 'Sign in securely'}</button>
-        <p className="signup-prompt">New to Stockwise AI? <button type="button" onClick={() => onCreateAccount?.()}>Create an account</button></p>
+        <p className="login-security-note">Accounts are provisioned by your system administrator.</p>
         <p className="login-security-note"><LockKeyhole size={14}/> Sign-in attempts are rate limited. Your session ends when this tab closes.</p>
       </form>
       <footer className="login-footer">Stockwise AI <span>·</span> Inventory operations</footer>

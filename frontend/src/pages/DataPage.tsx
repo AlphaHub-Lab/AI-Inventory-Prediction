@@ -60,7 +60,7 @@ const titles: Record<string, { title: string; subtitle: string }> = {
   analytics: { title: 'Analytics & What-If Simulation', subtitle: 'Supplier performance benchmarks and dynamic scenario stress testing.' },
   knowledge: { title: 'RAG Knowledge Base', subtitle: 'Standard operating procedures and policies cited by the conversational chatbot.' },
   models: { title: 'ML Model Performance & Evaluation', subtitle: 'SKU-aware forecasts scored on a rolling, chronological 7-day holdout.' },
-  users: { title: 'User & Role Management', subtitle: 'Role-based access control (Admin, Manager, Staff) enforced by backend.' },
+  users: { title: 'User & Role Management', subtitle: 'Administrator and owner provisioned accounts with associate permissions enforced by the backend.' },
   settings: { title: 'System Architecture & Configuration', subtitle: 'Operational settings, model parameters, and database connectivity.' },
 }
 
@@ -77,6 +77,13 @@ const endpoints: Record<string, string> = {
   models: '/api/models/runs',
   users: '/api/users'
 }
+
+const associatePermissions = [
+  'inventory.view', 'inventory.create', 'inventory.update', 'sales.view', 'sales.create',
+  'orders.view', 'orders.create', 'customers.view', 'suppliers.view', 'reports.view',
+  'reorder.view', 'reorder.create', 'reorder.update', 'receipt.scan', 'receipt.extract',
+  'receipt.review', 'receipt.import',
+]
 
 function format(value: unknown, key: string) {
   if (value === null || value === undefined) return '—'
@@ -107,6 +114,7 @@ export default function DataPage({ kind, currentUser }: { kind: string; currentU
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [expandedOrders, setExpandedOrders] = useState<Record<number, boolean>>({})
+  const [permissionDrafts, setPermissionDrafts] = useState<Record<number, string[]>>({})
 
   // Specialized states
   const [forecastHorizon, setForecastHorizon] = useState<number>(14)
@@ -146,12 +154,24 @@ export default function DataPage({ kind, currentUser }: { kind: string; currentU
         ep = `/api/forecasts?horizon_days=${forecastHorizon}`
       }
       const payload = await api<Item[] | { items: Item[] }>(ep)
-      setItems(Array.isArray(payload) ? payload : payload.items)
+      const rows = Array.isArray(payload) ? payload : payload.items
+      setItems(rows)
+      if (kind === 'users') setPermissionDrafts(Object.fromEntries(rows.map(row => [Number(row.id), Array.isArray(row.permissions) ? row.permissions as string[] : []])))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load records')
     } finally {
       setLoading(false)
     }
+  }
+
+  async function saveAssociatePermissions(userId: number) {
+    setActionLoading(true); setError(''); setSuccess('')
+    try {
+      const permissions = permissionDrafts[userId] || []
+      await api(`/api/users/${userId}/permissions`, { method: 'PUT', body: JSON.stringify({ permissions }) })
+      setSuccess('Associate permissions saved.'); await load()
+    } catch (err) { setError(err instanceof Error ? err.message : 'Could not save permissions.') }
+    finally { setActionLoading(false) }
   }
 
   useEffect(() => {
@@ -407,7 +427,7 @@ export default function DataPage({ kind, currentUser }: { kind: string; currentU
               <div style={{ background: '#f8fafc', padding: '0.75rem 1rem', borderRadius: 8, fontSize: 13, display: 'flex', flexDirection: 'column', gap: 6 }}>
                 <div><strong>Authentication:</strong> {systemInfo.auth_security}</div>
                 <div><strong>Secret Storage:</strong> Server-side .env (Never leaked to frontend)</div>
-                <div><strong>Roles:</strong> Admin (Full control), Manager (Approvals/PO), Staff (Operational entry)</div>
+                <div><strong>Roles:</strong> Administrator, Business Owner, Associate</div>
               </div>
             </article>
           </section>
@@ -479,7 +499,7 @@ export default function DataPage({ kind, currentUser }: { kind: string; currentU
           )}
 
           {kind === 'users' && (
-            <button className="primary-button" onClick={() => setShowUserModal(true)}>
+            currentUser?.role === 'admin' && <button className="primary-button" onClick={() => setShowUserModal(true)}>
               <UserPlus size={16} /> Add User
             </button>
           )}
@@ -826,16 +846,17 @@ export default function DataPage({ kind, currentUser }: { kind: string; currentU
               <thead>
                 <tr>
                   {Object.keys(filtered[0] || {})
-                    .filter(key => !['id', 'created_at', 'updated_at', 'batches', 'items', 'payload', 'password_hash'].includes(key))
+                    .filter(key => !['id', 'created_at', 'updated_at', 'batches', 'items', 'payload', 'password_hash', 'permissions'].includes(key))
                     .slice(0, 8)
                     .map(key => (
                       <th key={key}>{key.replace(/_/g, ' ')}</th>
                     ))}
+                  {kind === 'users' && currentUser?.role === 'business_owner' && <th>Associate permissions</th>}
                 </tr>
               </thead>
               <tbody>
                 {filtered.map((item, index) => {
-                  const cols = Object.keys(item).filter(k => !['id', 'created_at', 'updated_at', 'batches', 'items', 'payload', 'password_hash'].includes(k)).slice(0, 8)
+                  const cols = Object.keys(item).filter(k => !['id', 'created_at', 'updated_at', 'batches', 'items', 'payload', 'password_hash', 'permissions'].includes(k)).slice(0, 8)
                   return (
                     <tr key={String(item.id ?? index)}>
                       {cols.map(key => (
@@ -847,6 +868,7 @@ export default function DataPage({ kind, currentUser }: { kind: string; currentU
                           )}
                         </td>
                       ))}
+                      {kind === 'users' && currentUser?.role === 'business_owner' && <td>{item.role === 'associate' ? <details><summary>Edit grants</summary><div className="associate-permission-list">{associatePermissions.map(permission => <label key={permission}><input type="checkbox" checked={(permissionDrafts[Number(item.id)] || []).includes(permission)} onChange={event => setPermissionDrafts(prev => { const existing = prev[Number(item.id)] || []; return { ...prev, [Number(item.id)]: event.target.checked ? [...existing, permission] : existing.filter(value => value !== permission) } })}/>{permission}</label>)}<button className="row-action" disabled={actionLoading} onClick={() => void saveAssociatePermissions(Number(item.id))}>Save permissions</button></div></details> : '—'}</td>}
                     </tr>
                   )
                 })}
@@ -904,9 +926,8 @@ export default function DataPage({ kind, currentUser }: { kind: string; currentU
               <div>
                 <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Role</label>
                 <select name="role" required style={{ width: '100%', padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1' }}>
-                  <option value="staff">Staff (Operational &amp; Chatbot)</option>
-                  {(currentUser?.role === 'admin' || currentUser?.role === 'business_owner') && <option value="manager">Manager (Approvals &amp; Orders)</option>}
-                  {currentUser?.role === 'admin' && <option value="admin">Super administrator</option>}
+                  <option value="associate">Associate</option>
+                  {currentUser?.role === 'admin' && <option value="admin">Administrator</option>}
                 </select>
               </div>
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: '0.5rem' }}>

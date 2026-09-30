@@ -15,8 +15,8 @@ def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
 
 
-def create_token(subject: str, role: str, token_type: str = "access") -> str:
+def create_token(subject: str, role: str, session_id: str, token_type: str = "access") -> str:
     settings = get_settings()
     lifetime = timedelta(minutes=settings.access_token_minutes) if token_type == "access" else timedelta(days=settings.refresh_token_days)
-    payload = {"sub": subject, "role": role, "type": token_type, "exp": datetime.now(timezone.utc) + lifetime}
+    payload = {"sub": subject, "role": role, "sid": session_id, "type": token_type, "exp": datetime.now(timezone.utc) + lifetime}
     return jwt.encode(payload, settings.secret_key, algorithm=ALGORITHM)

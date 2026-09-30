@@ -1,5 +1,7 @@
 # Multi-Store Inventory Database — Supabase PostgreSQL
 
+> **Architecture notice:** This document describes the original schema-per-type layout inside one `postgres` database. The current physical database layout and live provisioning status are documented in [PHYSICAL_DATABASES.md](PHYSICAL_DATABASES.md). Do not run this document's legacy SQL setup steps to provision the physical `admin_db`, `master_*`, or per-business local databases.
+
 > Production-grade database architecture for a multi-store inventory and business management platform
 > supporting **Grocery**, **Medical**, **Food**, and **Stationery** stores.
 

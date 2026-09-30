@@ -10,7 +10,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 BACKEND_DIR = ROOT / "backend"
 FRONTEND_DIR = ROOT / "frontend"
-DB_FILE = BACKEND_DIR / "inventory.db"
 
 # Find python executable in .venv if present
 if sys.platform == "win32":
@@ -38,21 +37,23 @@ def check_frontend_health():
     except Exception:
         return False
 
-def ensure_database():
-    if not DB_FILE.exists():
-        print("[*] Database not found. Seeding initial data...")
-        res = subprocess.run([PYTHON_EXE, "-m", "app.seed"], cwd=str(BACKEND_DIR))
-        if res.returncode != 0:
-            print("[!] Warning: Database seeding failed.")
-        else:
-            print("[+] Database seeded successfully.")
+def ensure_postgres():
+    print("[*] Starting PostgreSQL with Docker Compose...")
+    try:
+        subprocess.run(["docker", "compose", "up", "-d", "--wait", "db"], cwd=str(ROOT), check=True)
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError("PostgreSQL could not be started. Install and start Docker Desktop, then retry.") from exc
 
 def main():
     print("=" * 60)
     print("       Stockwise AI — Unified Project Launcher")
     print("=" * 60)
 
-    ensure_database()
+    try:
+        ensure_postgres()
+    except RuntimeError as exc:
+        print(f"[!] {exc}")
+        sys.exit(1)
 
     processes = []
 

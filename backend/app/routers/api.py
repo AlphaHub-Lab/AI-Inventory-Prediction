@@ -1,6 +1,7 @@
 from datetime import date, datetime, timedelta
 from io import StringIO
 import csv
+import secrets
 import uuid
 from math import ceil
 from decimal import Decimal, ROUND_HALF_UP
@@ -9,11 +10,11 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_, text, update
 from sqlalchemy.orm import Session
 from ..db import engine, get_db
-from ..dependencies import get_current_user, require_roles
-from ..models import (AuditLog, Business, Category, ChatbotConversation, ChatbotMessage, CheckoutItem, CheckoutTransaction, ExpiryAlert, Forecast, InventoryBatch, InventoryTransaction,
+from ..dependencies import get_current_user, oauth2_scheme, require_permission, require_roles
+from ..models import (AuditLog, AuthSession, Business, Category, ChatbotConversation, ChatbotMessage, CheckoutItem, CheckoutTransaction, ExpiryAlert, Forecast, InventoryBatch, InventoryTransaction,
                       KnowledgeChunk, KnowledgeDocument, ModelRun, Product, PurchaseOrder, PurchaseOrderItem, ReorderRecommendation,
-                      Sale, Supplier, User, WastePrediction)
-from ..schemas import (AdminUserUpdate, BatchInput, BulkBatchInput, BusinessCreate, BusinessStatusUpdate, CategoryInput, ChatRequest, CheckoutInput, ConvertReordersInput, ForecastRequest, LoginRequest, SignupRequest, POItemInput, ProductInput, PurchaseOrderInput,
+                      Sale, Supplier, User, UserPermission, WastePrediction)
+from ..schemas import (AdminUserUpdate, BatchInput, BulkBatchInput, BusinessCreate, BusinessStatusUpdate, CategoryInput, ChatRequest, CheckoutInput, ConvertReordersInput, ForecastRequest, LoginRequest, PermissionUpdate, POItemInput, ProductInput, PurchaseOrderInput,
                        ReorderAction, SaleInput, StatusUpdate, StockAdjustment, SupplierInput, TokenResponse, UserCreate, UserRead, WeightStockAdjustment,
                        WhatIfRequest)
 from ..security import create_token, hash_password, verify_password
@@ -69,27 +70,11 @@ def login(request: Request, body: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == body.email).first()
     if not user or not user.is_active or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
-    return {"access_token": create_token(user.email, user.role), "refresh_token": create_token(user.email, user.role, "refresh"), "user": user}
-
-
-@api.post("/auth/signup", response_model=TokenResponse, status_code=201, tags=["auth"])
-@limiter.limit("3/hour")
-def signup(request: Request, body: SignupRequest, db: Session = Depends(get_db)):
-    if db.query(User).filter_by(email=body.email).first():
-        raise HTTPException(status_code=409, detail="An account with this email already exists")
-    business = Business(name=body.business_name.strip(), owner_email=body.email, is_active=True)
-    db.add(business)
-    db.flush()
-    db.info["business_id"] = business.id
-    user = User(email=body.email, full_name=body.full_name.strip(), password_hash=hash_password(body.password), role="business_owner", business_id=business.id, is_active=True)
-    db.add(Category(name="General", business_id=business.id))
-    db.add(Supplier(name="Default Supplier", email=body.email, business_id=business.id))
-    db.add(user)
-    db.flush()
-    audit(db, user, "self_registration", "user", user.id)
+    from ..config import get_settings
+    session_id = secrets.token_urlsafe(32)
+    db.add(AuthSession(id=session_id, user_id=user.id, expires_at=datetime.utcnow() + timedelta(days=get_settings().refresh_token_days)))
     db.commit()
-    db.refresh(user)
-    return {"access_token": create_token(user.email, user.role), "refresh_token": create_token(user.email, user.role, "refresh"), "user": user}
+    return {"access_token": create_token(user.email, user.role, session_id), "refresh_token": create_token(user.email, user.role, session_id, "refresh"), "user": user}
 
 
 @api.post("/auth/refresh", tags=["auth"])
@@ -99,14 +84,31 @@ def refresh_token(refresh_token: str, db: Session = Depends(get_db)):
     from ..security import ALGORITHM
     try:
         payload = jwt.decode(refresh_token, get_settings().secret_key, algorithms=[ALGORITHM])
-        if payload.get("type") != "refresh":
+        if payload.get("type") != "refresh" or not payload.get("sid"):
             raise ValueError
         user = db.query(User).filter_by(email=payload.get("sub"), is_active=True).first()
         if not user:
             raise ValueError
+        session = db.query(AuthSession).filter_by(id=payload["sid"], user_id=user.id, revoked_at=None).first()
+        if not session or session.expires_at <= datetime.utcnow():
+            raise ValueError
+        session.expires_at = datetime.utcnow() + timedelta(days=get_settings().refresh_token_days)
+        db.commit()
     except (JWTError, ValueError):
         raise HTTPException(401, "Invalid refresh token")
-    return {"access_token": create_token(user.email, user.role), "refresh_token": create_token(user.email, user.role, "refresh"), "token_type": "bearer"}
+    return {"access_token": create_token(user.email, user.role, session.id), "refresh_token": create_token(user.email, user.role, session.id, "refresh"), "token_type": "bearer"}
+
+
+@api.post("/auth/logout", status_code=204, tags=["auth"])
+def logout(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from jose import jwt
+    from ..config import get_settings
+    from ..security import ALGORITHM
+    payload = jwt.decode(token, get_settings().secret_key, algorithms=[ALGORITHM])
+    session = db.query(AuthSession).filter_by(id=payload.get("sid"), user_id=user.id, revoked_at=None).first()
+    if session:
+        session.revoked_at = datetime.utcnow()
+        db.commit()
 
 
 @api.get("/auth/me", response_model=UserRead, tags=["auth"])
@@ -116,33 +118,55 @@ def me(user: User = Depends(get_current_user)):
 
 @api.get("/users", tags=["users"])
 def list_users(db: Session = Depends(get_db), actor: User = Depends(get_current_user)):
-    if actor.role not in {"admin", "business_owner", "manager"}:
+    if actor.role not in {"admin", "business_owner"}:
         raise HTTPException(403, "Insufficient permissions")
-    return [{"id": u.id, "email": u.email, "full_name": u.full_name, "role": u.role, "is_active": u.is_active, "business_id": u.business_id, "business_name": u.business_name} for u in db.query(User).order_by(User.full_name).all()]
+    return [{"id": u.id, "email": u.email, "full_name": u.full_name, "role": u.role, "is_active": u.is_active, "business_id": u.business_id, "business_name": u.business_name,
+             "permissions": [p.permission for p in db.query(UserPermission).filter_by(user_id=u.id).order_by(UserPermission.permission).all()]}
+            for u in db.query(User).order_by(User.full_name).all()]
 
 
 @api.post("/users", status_code=201, tags=["users"])
 def create_user(body: UserCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     if user.role == "admin":
-        if body.role == "business_owner":
-            raise HTTPException(422, "Create a business and its owner through the business workspace")
         business_id = body.business_id
         business = db.get(Business, business_id) if business_id else None
         if body.role != "admin" and (not business or not business.is_active):
             raise HTTPException(422, "Choose an active business for this account")
         if body.role == "admin" and business_id is not None:
             raise HTTPException(422, "Super administrator accounts are not assigned to a business")
-    elif user.role == "business_owner" and body.role in {"manager", "staff"}:
-        business_id = user.business_id
-    elif user.role == "manager" and body.role == "staff":
-        business_id = user.business_id
+        if body.role == "business_owner":
+            raise HTTPException(422, "Create a business and its owner through the business workspace")
     else:
-        raise HTTPException(403, "You cannot create an account with that role")
+        raise HTTPException(403, "Only an administrator can create user accounts")
     if db.query(User).filter_by(email=body.email).first():
         raise HTTPException(409, "Email already exists")
     created = User(email=body.email, full_name=body.full_name, password_hash=hash_password(body.password), role=body.role, business_id=business_id)
     db.add(created); db.flush(); audit(db, user, "create", "user", created.id); db.commit()
     return {"id": created.id, "email": created.email, "full_name": created.full_name, "role": created.role, "is_active": created.is_active, "business_id": created.business_id, "business_name": created.business_name}
+
+
+ASSOCIATE_PERMISSIONS = {
+    "inventory.view", "inventory.create", "inventory.update", "sales.view", "sales.create",
+    "orders.view", "orders.create", "customers.view", "suppliers.view", "reports.view",
+    "reorder.view", "reorder.create", "reorder.update", "receipt.scan", "receipt.extract",
+    "receipt.review", "receipt.import",
+}
+
+
+@api.put("/users/{user_id}/permissions", tags=["users"])
+def set_associate_permissions(user_id: int, body: PermissionUpdate, db: Session = Depends(get_db), owner: User = Depends(require_roles("business_owner"))):
+    target = db.query(User).filter(User.id == user_id, User.business_id == owner.business_id, User.role == "associate").first()
+    if not target:
+        raise HTTPException(404, "Associate not found in your business")
+    requested = set(body.permissions)
+    invalid = requested - ASSOCIATE_PERMISSIONS
+    if invalid:
+        raise HTTPException(422, f"Unsupported associate permissions: {', '.join(sorted(invalid))}")
+    db.query(UserPermission).filter(UserPermission.user_id == target.id).delete(synchronize_session=False)
+    db.add_all(UserPermission(user_id=target.id, permission=name, granted_by=owner.id) for name in sorted(requested))
+    audit(db, owner, "permissions_update", "user", target.id, {"permissions": sorted(requested)})
+    db.commit()
+    return {"user_id": target.id, "permissions": sorted(requested)}
 
 
 @api.put("/admin/users/{user_id}", tags=["administrator"])
@@ -300,7 +324,9 @@ def admin_dashboard(
 def admin_businesses(db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
     rows = db.query(Business).order_by(Business.created_at.desc()).all()
     return [{
-        "id": business.id, "name": business.name, "owner_email": business.owner_email,
+        "id": business.id, "name": business.name, "business_type": business.business_type,
+        "master_database_name": business.master_database_name, "local_database_name": business.local_database_name,
+        "owner_email": business.owner_email,
         "is_active": business.is_active, "created_at": business.created_at,
         "accounts": db.query(User).filter_by(business_id=business.id).count(),
         "products": db.query(Product).filter_by(business_id=business.id).count(),
@@ -312,17 +338,22 @@ def admin_businesses(db: Session = Depends(get_db), _: User = Depends(require_ro
 def create_business(body: BusinessCreate, db: Session = Depends(get_db), actor: User = Depends(require_roles("admin"))):
     if db.query(User).filter_by(email=body.owner_email).first():
         raise HTTPException(409, "An account with this owner email already exists")
-    business = Business(name=body.name.strip(), owner_email=body.owner_email, is_active=True)
+    business_type = body.business_type
+    business = Business(
+        name=body.name.strip(), owner_email=body.owner_email, business_type=business_type,
+        master_database_name=f"master_{business_type}", is_active=True,
+    )
     db.add(business)
     db.flush()
+    business.local_database_name = f"local_business_{business.id}"
     owner = User(email=body.owner_email, full_name=body.owner_name.strip(), password_hash=hash_password(body.owner_password), role="business_owner", business_id=business.id)
     db.add(owner)
-    db.add(Category(name="General", business_id=business.id))
+    db.add(Category(name="General", is_grocery=business_type == "grocery", business_id=business.id))
     db.add(Supplier(name="Default Supplier", email=body.owner_email, business_id=business.id))
     db.flush()
-    audit(db, actor, "create", "business", business.id, {"name": business.name, "owner_email": business.owner_email})
+    audit(db, actor, "create", "business", business.id, {"name": business.name, "business_type": business.business_type, "master_database_name": business.master_database_name, "local_database_name": business.local_database_name, "owner_email": business.owner_email})
     db.commit()
-    return {"id": business.id, "name": business.name, "owner_email": business.owner_email, "is_active": business.is_active, "created_at": business.created_at, "accounts": 1, "products": 0, "sales": 0}
+    return {"id": business.id, "name": business.name, "business_type": business.business_type, "master_database_name": business.master_database_name, "local_database_name": business.local_database_name, "owner_email": business.owner_email, "is_active": business.is_active, "created_at": business.created_at, "accounts": 1, "products": 0, "sales": 0}
 
 
 @api.put("/admin/businesses/{business_id}", tags=["administrator"])
@@ -331,9 +362,12 @@ def update_business_status(business_id: int, body: BusinessStatusUpdate, db: Ses
     if not business:
         raise HTTPException(404, "Business not found")
     business.is_active = body.is_active
-    audit(db, actor, "business_status", "business", business.id, {"is_active": body.is_active})
+    if body.business_type:
+        business.business_type = body.business_type
+        business.master_database_name = f"master_{body.business_type}"
+    audit(db, actor, "business_status", "business", business.id, {"is_active": body.is_active, "business_type": business.business_type, "master_database_name": business.master_database_name})
     db.commit()
-    return {"id": business.id, "name": business.name, "owner_email": business.owner_email, "is_active": business.is_active}
+    return {"id": business.id, "name": business.name, "business_type": business.business_type, "master_database_name": business.master_database_name, "local_database_name": business.local_database_name, "owner_email": business.owner_email, "is_active": business.is_active}
 
 
 @api.get("/admin/notifications", tags=["administrator"])
@@ -413,7 +447,7 @@ def admin_records(
 
 
 @api.get("/categories", tags=["catalog"])
-def list_categories(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def list_categories(db: Session = Depends(get_db), _: User = Depends(require_permission("inventory.view"))):
     return [{"id": c.id, "name": c.name, "is_grocery": c.is_grocery, "default_weight_unit": c.default_weight_unit,
              "default_weight_g": c.default_weight_g, "weight_increment_g": c.weight_increment_g,
              "minimum_weight_g": c.minimum_weight_g, "maximum_weight_g": c.maximum_weight_g}
@@ -421,7 +455,7 @@ def list_categories(db: Session = Depends(get_db), _: User = Depends(get_current
 
 
 @api.post("/categories", status_code=201, tags=["catalog"])
-def create_category(body: CategoryInput, db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "manager"))):
+def create_category(body: CategoryInput, db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "business_owner"))):
     if db.query(Category).filter(func.lower(Category.name) == body.name.lower()).first():
         raise HTTPException(409, "Category already exists")
     category = Category(**body.model_dump()); db.add(category); db.flush(); audit(db, user, "create", "category", category.id); db.commit()
@@ -429,7 +463,7 @@ def create_category(body: CategoryInput, db: Session = Depends(get_db), user: Us
 
 
 @api.put("/categories/{category_id}", tags=["catalog"])
-def update_category(category_id: int, body: CategoryInput, db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "manager"))):
+def update_category(category_id: int, body: CategoryInput, db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "business_owner"))):
     category = db.get(Category, category_id)
     if not category:
         raise HTTPException(404, "Category not found")
@@ -443,19 +477,19 @@ def update_category(category_id: int, body: CategoryInput, db: Session = Depends
 
 
 @api.get("/suppliers", tags=["suppliers"])
-def list_suppliers(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def list_suppliers(db: Session = Depends(get_db), _: User = Depends(require_permission("suppliers.view"))):
     return [{"id": s.id, "name": s.name, "email": s.email, "phone": s.phone, "lead_time_days": s.lead_time_days, "minimum_order_quantity": s.minimum_order_quantity, "reliability_score": s.reliability_score,
              "product_count": len(s.products)} for s in db.query(Supplier).order_by(Supplier.name)]
 
 
 @api.post("/suppliers", status_code=201, tags=["suppliers"])
-def create_supplier(body: SupplierInput, db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "manager"))):
+def create_supplier(body: SupplierInput, db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "business_owner"))):
     supplier = Supplier(**body.model_dump()); db.add(supplier); db.flush(); audit(db, user, "create", "supplier", supplier.id); db.commit()
     return {"id": supplier.id, **body.model_dump()}
 
 
 @api.put("/suppliers/{supplier_id}", tags=["suppliers"])
-def update_supplier(supplier_id: int, body: SupplierInput, db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "manager"))):
+def update_supplier(supplier_id: int, body: SupplierInput, db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "business_owner"))):
     supplier = db.get(Supplier, supplier_id)
     if not supplier: raise HTTPException(404, "Supplier not found")
     for field, value in body.model_dump().items(): setattr(supplier, field, value)
@@ -463,7 +497,7 @@ def update_supplier(supplier_id: int, body: SupplierInput, db: Session = Depends
 
 
 @api.get("/products", tags=["products"])
-def list_products(q: str | None = None, category_id: int | None = None, low_stock: bool = False, page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def list_products(q: str | None = None, category_id: int | None = None, low_stock: bool = False, page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), db: Session = Depends(get_db), _: User = Depends(require_permission("inventory.view"))):
     query = db.query(Product)
     if q: query = query.filter(or_(Product.name.ilike(f"%{q}%"), Product.sku.ilike(f"%{q}%")))
     if category_id: query = query.filter(Product.category_id == category_id)
@@ -473,7 +507,7 @@ def list_products(q: str | None = None, category_id: int | None = None, low_stoc
 
 
 @api.post("/products", status_code=201, tags=["products"])
-def create_product(body: ProductInput, db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "manager"))):
+def create_product(body: ProductInput, db: Session = Depends(get_db), user: User = Depends(require_permission("inventory.create"))):
     if db.query(Product).filter_by(sku=body.sku).first(): raise HTTPException(409, "SKU already exists")
     category = db.get(Category, body.category_id)
     if not category or not db.get(Supplier, body.supplier_id): raise HTTPException(422, "Category or supplier does not exist")
@@ -482,7 +516,7 @@ def create_product(body: ProductInput, db: Session = Depends(get_db), user: User
 
 
 @api.get("/products/{product_id}", tags=["products"])
-def get_product(product_id: int, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def get_product(product_id: int, db: Session = Depends(get_db), _: User = Depends(require_permission("inventory.view"))):
     product = db.get(Product, product_id)
     if not product: raise HTTPException(404, "Product not found")
     payload = product_data(product)
@@ -491,7 +525,7 @@ def get_product(product_id: int, db: Session = Depends(get_db), _: User = Depend
 
 
 @api.put("/products/{product_id}", tags=["products"])
-def update_product(product_id: int, body: ProductInput, db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "manager"))):
+def update_product(product_id: int, body: ProductInput, db: Session = Depends(get_db), user: User = Depends(require_permission("inventory.update"))):
     product = db.get(Product, product_id)
     if not product: raise HTTPException(404, "Product not found")
     category = db.get(Category, body.category_id)
@@ -509,7 +543,7 @@ def archive_product(product_id: int, db: Session = Depends(get_db), user: User =
 
 
 @api.post("/inventory/{product_id}/adjust", tags=["inventory"])
-def adjust_stock(product_id: int, body: StockAdjustment, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def adjust_stock(product_id: int, body: StockAdjustment, db: Session = Depends(get_db), user: User = Depends(require_permission("inventory.update"))):
     product = db.get(Product, product_id)
     if not product: raise HTTPException(404, "Product not found")
     if product.current_stock + body.quantity_delta < 0: raise HTTPException(422, "Adjustment would produce negative stock")
@@ -520,7 +554,7 @@ def adjust_stock(product_id: int, body: StockAdjustment, db: Session = Depends(g
 
 
 @api.post("/inventory/{product_id}/weight-adjust", tags=["inventory"])
-def adjust_weight_stock(product_id: int, body: WeightStockAdjustment, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def adjust_weight_stock(product_id: int, body: WeightStockAdjustment, db: Session = Depends(get_db), user: User = Depends(require_permission("inventory.update"))):
     product = db.get(Product, product_id)
     if not product: raise HTTPException(404, "Product not found")
     if not product.category or not product.category.is_grocery or not product.is_weight_based:
@@ -536,14 +570,14 @@ def adjust_weight_stock(product_id: int, body: WeightStockAdjustment, db: Sessio
 
 
 @api.get("/inventory/transactions", tags=["inventory"])
-def list_transactions(product_id: int | None = None, limit: int = Query(100, ge=1, le=500), db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def list_transactions(product_id: int | None = None, limit: int = Query(100, ge=1, le=500), db: Session = Depends(get_db), _: User = Depends(require_permission("inventory.view"))):
     query = db.query(InventoryTransaction)
     if product_id: query = query.filter_by(product_id=product_id)
     return [{"id": t.id, "product_id": t.product_id, "quantity_delta": t.quantity_delta, "weight_delta_g": t.weight_delta_g, "transaction_type": t.transaction_type, "note": t.note, "created_at": t.created_at} for t in query.order_by(InventoryTransaction.created_at.desc()).limit(limit)]
 
 
 @api.post("/inventory/batches", status_code=201, tags=["inventory"])
-def receive_batches(body: BulkBatchInput | BatchInput, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def receive_batches(body: BulkBatchInput | BatchInput, db: Session = Depends(get_db), user: User = Depends(require_permission("inventory.create"))):
     items = body.batches if isinstance(body, BulkBatchInput) else [body]
     results = []
     for b in items:
@@ -586,7 +620,7 @@ def receive_batches(body: BulkBatchInput | BatchInput, db: Session = Depends(get
 
 
 @api.get("/inventory/batches", tags=["inventory"])
-def list_batches(product_id: int | None = None, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def list_batches(product_id: int | None = None, db: Session = Depends(get_db), _: User = Depends(require_permission("inventory.view"))):
     query = db.query(InventoryBatch)
     if product_id:
         query = query.filter_by(product_id=product_id)
@@ -606,7 +640,7 @@ def list_batches(product_id: int | None = None, db: Session = Depends(get_db), _
 
 
 @api.get("/checkout/products", tags=["checkout"])
-def checkout_products(q: str = Query(default="", max_length=120), db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def checkout_products(q: str = Query(default="", max_length=120), db: Session = Depends(get_db), _: User = Depends(require_permission("inventory.view"))):
     query = db.query(Product).filter(Product.status == "active")
     term = q.strip()
     if term:
@@ -636,7 +670,7 @@ def checkout_data(transaction: CheckoutTransaction) -> dict:
 
 
 @api.post("/checkout/sales", status_code=201, tags=["checkout"])
-def complete_checkout(body: CheckoutInput, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def complete_checkout(body: CheckoutInput, db: Session = Depends(get_db), user: User = Depends(require_permission("sales.create"))):
     quantities: dict[int, int] = {}
     selected_weights: dict[int, int] = {}
     selected_units: dict[int, str] = {}
@@ -745,7 +779,7 @@ def complete_checkout(body: CheckoutInput, db: Session = Depends(get_db), user: 
 
 
 @api.get("/checkout/invoices/{invoice_id}", tags=["checkout"])
-def get_checkout_invoice(invoice_id: str, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def get_checkout_invoice(invoice_id: str, db: Session = Depends(get_db), _: User = Depends(require_permission("sales.view"))):
     transaction = db.query(CheckoutTransaction).filter_by(invoice_id=invoice_id).first()
     if not transaction:
         raise HTTPException(404, "Invoice not found")
@@ -753,7 +787,7 @@ def get_checkout_invoice(invoice_id: str, db: Session = Depends(get_db), _: User
 
 
 @api.get("/sales", tags=["sales"])
-def list_sales(product_id: int | None = None, start: date | None = None, end: date | None = None, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200), db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def list_sales(product_id: int | None = None, start: date | None = None, end: date | None = None, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200), db: Session = Depends(get_db), _: User = Depends(require_permission("sales.view"))):
     query = db.query(Sale)
     if product_id: query = query.filter_by(product_id=product_id)
     if start: query = query.filter(Sale.date >= start)
@@ -763,7 +797,7 @@ def list_sales(product_id: int | None = None, start: date | None = None, end: da
 
 
 @api.post("/sales", status_code=201, tags=["sales"])
-def create_sale(body: SaleInput, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def create_sale(body: SaleInput, db: Session = Depends(get_db), user: User = Depends(require_permission("sales.create"))):
     product = db.get(Product, body.product_id)
     if not product: raise HTTPException(422, "Product does not exist")
     if product.current_stock < body.quantity_sold: raise HTTPException(422, "Insufficient stock")
@@ -773,14 +807,14 @@ def create_sale(body: SaleInput, db: Session = Depends(get_db), user: User = Dep
 
 
 @api.get("/sales/export", tags=["sales"])
-def export_sales(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def export_sales(db: Session = Depends(get_db), _: User = Depends(require_permission("sales.view"))):
     output = StringIO(); writer = csv.DictWriter(output, fieldnames=["date", "product_id", "quantity_sold", "unit_price", "discount", "promotion", "holiday", "channel", "location", "revenue"]); writer.writeheader()
     for sale in db.query(Sale).order_by(Sale.date): writer.writerow({k: v.isoformat() if hasattr(v, "isoformat") else v for k, v in sale_data(sale).items() if k != "id"})
     return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=sales.csv"})
 
 
 @api.post("/sales/import", tags=["sales"])
-async def import_sales(file: UploadFile = File(...), db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "manager"))):
+async def import_sales(file: UploadFile = File(...), db: Session = Depends(get_db), user: User = Depends(require_permission("sales.create"))):
     if not file.filename or not file.filename.endswith(".csv"): raise HTTPException(422, "Upload a CSV file")
     reader = csv.DictReader((await file.read()).decode("utf-8").splitlines()); inserted = 0; errors = []
     for line, row in enumerate(reader, start=2):
@@ -794,7 +828,7 @@ async def import_sales(file: UploadFile = File(...), db: Session = Depends(get_d
 
 
 @api.post("/forecasts/generate", tags=["forecasts"])
-def generate_forecasts(body: ForecastRequest, db: Session = Depends(get_db), _: User = Depends(require_roles("admin", "manager"))):
+def generate_forecasts(body: ForecastRequest, db: Session = Depends(get_db), _: User = Depends(require_roles("admin", "business_owner"))):
     products = [db.get(Product, body.product_id)] if body.product_id else db.query(Product).filter_by(status="active").all()
     if not products or not products[0]: raise HTTPException(404, "Product not found")
     generated = []
@@ -805,7 +839,7 @@ def generate_forecasts(body: ForecastRequest, db: Session = Depends(get_db), _: 
 
 
 @api.get("/forecasts", tags=["forecasts"])
-def list_forecasts(product_id: int | None = None, horizon_days: int = Query(7, ge=1, le=30), db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def list_forecasts(product_id: int | None = None, horizon_days: int = Query(7, ge=1, le=30), db: Session = Depends(get_db), _: User = Depends(require_permission("ai.forecast"))):
     products = [db.get(Product, product_id)] if product_id else db.query(Product).filter_by(status="active").all()
     if not products or not products[0]: raise HTTPException(404, "Product not found")
     end = date.today() + timedelta(days=horizon_days)
@@ -815,7 +849,7 @@ def list_forecasts(product_id: int | None = None, horizon_days: int = Query(7, g
 
 
 @api.get("/forecasts/{product_id}/series", tags=["forecasts"])
-def forecast_series(product_id: int, history_days: int = Query(30, ge=7, le=365), db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def forecast_series(product_id: int, history_days: int = Query(30, ge=7, le=365), db: Session = Depends(get_db), _: User = Depends(require_permission("ai.forecast"))):
     product = db.get(Product, product_id)
     if not product: raise HTTPException(404, "Product not found")
     start = date.today() - timedelta(days=history_days)
@@ -825,12 +859,12 @@ def forecast_series(product_id: int, history_days: int = Query(30, ge=7, le=365)
 
 
 @api.post("/insights/refresh", tags=["insights"])
-def refresh_insights(db: Session = Depends(get_db), _: User = Depends(require_roles("admin", "manager"))):
+def refresh_insights(db: Session = Depends(get_db), _: User = Depends(require_roles("admin", "business_owner"))):
     refresh_operational_insights(db); return {"status": "refreshed", "as_of": datetime.utcnow()}
 
 
 @api.get("/dashboard", tags=["analytics"])
-def dashboard(start: date | None = None, end: date | None = None, category_id: int | None = None, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def dashboard(start: date | None = None, end: date | None = None, category_id: int | None = None, db: Session = Depends(get_db), _: User = Depends(require_permission("reports.view"))):
     end = end or date.today(); start = start or (end - timedelta(days=30))
     product_query = db.query(Product).filter(Product.status == "active")
     if category_id: product_query = product_query.filter(Product.category_id == category_id)
@@ -866,32 +900,32 @@ def dashboard(start: date | None = None, end: date | None = None, category_id: i
 
 
 @api.get("/analytics/suppliers", tags=["analytics"])
-def supplier_analytics(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def supplier_analytics(db: Session = Depends(get_db), _: User = Depends(require_permission("reports.view"))):
     return [{"supplier": s.name, "lead_time_days": s.lead_time_days, "reliability_score": s.reliability_score, "products": len(s.products), "open_orders": db.query(PurchaseOrder).filter(PurchaseOrder.supplier_id == s.id, PurchaseOrder.status.in_(["draft", "approved", "ordered"])).count()} for s in db.query(Supplier).all()]
 
 
 @api.get("/waste", tags=["waste"])
-def list_waste(risk: str | None = None, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def list_waste(risk: str | None = None, db: Session = Depends(get_db), _: User = Depends(require_permission("ai.waste_analysis"))):
     query = db.query(WastePrediction).filter(WastePrediction.calculated_for == date.today())
     if risk: query = query.filter(WastePrediction.risk_level == risk.upper())
     return [{"id": w.id, "product_id": w.product_id, "product_name": db.get(Product, w.product_id).name, "risk_level": w.risk_level, "units_at_risk": w.units_at_risk, "estimated_value": float(w.estimated_value), "recommendation": w.recommendation} for w in query.order_by(WastePrediction.estimated_value.desc())]
 
 
 @api.get("/expiry", tags=["expiry"])
-def list_expiry(days: int = Query(7, ge=0, le=365), db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def list_expiry(days: int = Query(7, ge=0, le=365), db: Session = Depends(get_db), _: User = Depends(require_permission("inventory.view"))):
     cutoff = date.today() + timedelta(days=days)
     rows = db.query(Product).filter(Product.expiry_date.is_not(None), Product.expiry_date <= cutoff).order_by(Product.expiry_date).all()
     return [{"product_id": p.id, "product_name": p.name, "expiry_date": p.expiry_date, "days_remaining": (p.expiry_date-date.today()).days, "status": "expired" if p.expiry_date < date.today() else "expiring", "current_stock": p.current_stock} for p in rows]
 
 
 @api.get("/reorders", tags=["reorders"])
-def list_reorders(status_filter: str = "draft", db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def list_reorders(status_filter: str = "draft", db: Session = Depends(get_db), _: User = Depends(require_permission("reorder.view"))):
     rows = db.query(ReorderRecommendation).filter_by(status=status_filter).order_by(ReorderRecommendation.created_at.desc()).all()
     return [{"id": r.id, "product_id": r.product_id, "product_name": db.get(Product, r.product_id).name, "current_stock": db.get(Product, r.product_id).current_stock, "reorder_point": db.get(Product, r.product_id).reorder_point, "safety_stock": db.get(Product, r.product_id).safety_stock, "lead_time_days": db.get(Product, r.product_id).lead_time_days, "forecast_demand": r.forecast_demand, "recommended_quantity": r.recommended_quantity, "explanation": r.explanation, "status": r.status} for r in rows]
 
 
 @api.post("/reorders/{recommendation_id}/action", tags=["reorders"])
-def act_reorder(recommendation_id: int, body: ReorderAction, db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "manager"))):
+def act_reorder(recommendation_id: int, body: ReorderAction, db: Session = Depends(get_db), user: User = Depends(require_permission("reorder.update"))):
     row = db.get(ReorderRecommendation, recommendation_id)
     if not row: raise HTTPException(404, "Recommendation not found")
     if row.status != "draft": raise HTTPException(409, "Only draft recommendations can be actioned")
@@ -899,7 +933,7 @@ def act_reorder(recommendation_id: int, body: ReorderAction, db: Session = Depen
 
 
 @api.post("/what-if", tags=["analytics"])
-def what_if(body: WhatIfRequest, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def what_if(body: WhatIfRequest, db: Session = Depends(get_db), _: User = Depends(require_permission("ai.business_insights"))):
     product = db.get(Product, body.product_id)
     if not product: raise HTTPException(404, "Product not found")
     lead_time = body.lead_time_days if body.lead_time_days is not None else product.lead_time_days
@@ -913,13 +947,13 @@ def what_if(body: WhatIfRequest, db: Session = Depends(get_db), _: User = Depend
 
 
 @api.get("/purchase-orders", tags=["purchase orders"])
-def list_pos(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def list_pos(db: Session = Depends(get_db), _: User = Depends(require_permission("orders.view"))):
     rows = db.query(PurchaseOrder).order_by(PurchaseOrder.created_at.desc()).all()
     return [{"id": po.id, "supplier_id": po.supplier_id, "supplier_name": db.get(Supplier, po.supplier_id).name, "status": po.status, "expected_delivery": po.expected_delivery, "created_at": po.created_at, "items": [{"product_id": i.product_id, "product_name": db.get(Product, i.product_id).name, "quantity": i.quantity, "unit_price": float(i.unit_price)} for i in po.items]} for po in rows]
 
 
 @api.post("/purchase-orders", status_code=201, tags=["purchase orders"])
-def create_po(body: PurchaseOrderInput, db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "manager"))):
+def create_po(body: PurchaseOrderInput, db: Session = Depends(get_db), user: User = Depends(require_permission("orders.create"))):
     supplier = db.get(Supplier, body.supplier_id)
     if not supplier: raise HTTPException(422, "Supplier does not exist")
     po = PurchaseOrder(supplier_id=supplier.id, expected_delivery=body.expected_delivery or date.today()+timedelta(days=supplier.lead_time_days), created_by=user.id)
@@ -932,7 +966,7 @@ def create_po(body: PurchaseOrderInput, db: Session = Depends(get_db), user: Use
 
 
 @api.post("/purchase-orders/from-reorders", status_code=201, tags=["purchase orders"])
-def convert_reorders_to_pos(body: ConvertReordersInput, db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "manager"))):
+def convert_reorders_to_pos(body: ConvertReordersInput, db: Session = Depends(get_db), user: User = Depends(require_permission("orders.create"))):
     recommendations = db.query(ReorderRecommendation).filter(ReorderRecommendation.id.in_(body.recommendation_ids)).all()
     if not recommendations:
         raise HTTPException(404, "No recommendations found")
@@ -965,7 +999,7 @@ def convert_reorders_to_pos(body: ConvertReordersInput, db: Session = Depends(ge
 
 
 @api.post("/purchase-orders/{po_id}/receive", tags=["purchase orders"])
-def receive_po(po_id: int, db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "manager"))):
+def receive_po(po_id: int, db: Session = Depends(get_db), user: User = Depends(require_permission("orders.update"))):
     po = db.get(PurchaseOrder, po_id)
     if not po:
         raise HTTPException(404, "Purchase order not found")
@@ -991,32 +1025,32 @@ def receive_po(po_id: int, db: Session = Depends(get_db), user: User = Depends(r
 
 
 @api.post("/purchase-orders/{po_id}/status", tags=["purchase orders"])
-def update_po_status(po_id: int, body: StatusUpdate, db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "manager"))):
+def update_po_status(po_id: int, body: StatusUpdate, db: Session = Depends(get_db), user: User = Depends(require_permission("orders.update"))):
     po = db.get(PurchaseOrder, po_id)
     if not po: raise HTTPException(404, "Purchase order not found")
-    if body.status in {"approved", "ordered", "received"} and user.role not in {"admin", "manager"}: raise HTTPException(403, "Manager approval required")
+    if body.status in {"approved", "ordered", "received"} and user.role not in {"admin", "business_owner"}: raise HTTPException(403, "Business owner approval required")
     if body.status == "received" and po.status != "received":
         return receive_po(po_id, db, user)
     po.status = body.status; audit(db, user, "status_change", "purchase_order", po.id, {"status": body.status}); db.commit(); return {"id": po.id, "status": po.status}
 
 
 @api.get("/knowledge", tags=["knowledge"])
-def list_knowledge(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def list_knowledge(db: Session = Depends(get_db), _: User = Depends(require_permission("ai.rag"))):
     return [{"id": d.id, "title": d.title, "body": d.body, "created_at": d.created_at} for d in db.query(KnowledgeDocument).order_by(KnowledgeDocument.title)]
 
 
 @api.post("/knowledge", status_code=201, tags=["knowledge"])
-def create_knowledge(title: str, body: str, db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "manager"))):
+def create_knowledge(title: str, body: str, db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "business_owner"))):
     document = KnowledgeDocument(title=title, body=body); db.add(document); db.flush(); db.add(KnowledgeChunk(document_id=document.id, content=body, metadata_json={"section": title})); audit(db, user, "create", "knowledge_document", document.id); db.commit(); return {"id": document.id, "title": document.title}
 
 
 @api.get("/models/runs", tags=["model evaluation"])
-def model_runs(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def model_runs(db: Session = Depends(get_db), _: User = Depends(require_permission("ai.forecast"))):
     return [{"id": r.id, "model_name": r.model_name, "version": r.version, "train_start": r.train_start, "train_end": r.train_end, "mae": r.mae, "rmse": r.rmse, "mape": r.mape, "r2": r.r2, "horizon_days": r.horizon_days, "trained_at": r.created_at} for r in db.query(ModelRun).order_by(ModelRun.created_at.desc())]
 
 
 @api.post("/models/train", tags=["model evaluation"])
-def trigger_model_training(db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "manager"))):
+def trigger_model_training(db: Session = Depends(get_db), user: User = Depends(require_roles("admin", "business_owner"))):
     import importlib.util
     from pathlib import Path
     root = Path(__file__).resolve().parents[3]
@@ -1057,7 +1091,7 @@ def system_info(user: User = Depends(get_current_user)):
 
 @api.post("/chat", tags=["chatbot"])
 @limiter.limit("20/minute")
-async def chat(request: Request, body: ChatRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+async def chat(request: Request, body: ChatRequest, db: Session = Depends(get_db), user: User = Depends(require_permission("ai.chat"))):
     conversation = db.get(ChatbotConversation, body.conversation_id) if body.conversation_id else None
     if conversation and conversation.user_id != user.id: raise HTTPException(403, "Conversation belongs to another user")
     active_business_id = user.business_id or db.info.get("business_id")
@@ -1076,12 +1110,12 @@ async def chat(request: Request, body: ChatRequest, db: Session = Depends(get_db
 
 
 @api.get("/chat/conversations", tags=["chatbot"])
-def conversations(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def conversations(db: Session = Depends(get_db), user: User = Depends(require_permission("ai.chat"))):
     return [{"id": c.id, "title": c.title, "created_at": c.created_at} for c in db.query(ChatbotConversation).filter_by(user_id=user.id).order_by(ChatbotConversation.updated_at.desc())]
 
 
 @api.get("/chat/conversations/{conversation_id}", tags=["chatbot"])
-def conversation_messages(conversation_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def conversation_messages(conversation_id: int, db: Session = Depends(get_db), user: User = Depends(require_permission("ai.chat"))):
     conversation = db.get(ChatbotConversation, conversation_id)
     if not conversation: raise HTTPException(404, "Conversation not found")
     if conversation.user_id != user.id: raise HTTPException(403, "Conversation belongs to another user")

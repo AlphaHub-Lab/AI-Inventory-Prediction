@@ -1,12 +1,15 @@
 from functools import lru_cache
-from pydantic import model_validator
+from pathlib import Path
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
     app_name: str = "Inventory Intelligence API"
     environment: str = "development"
-    database_url: str = "sqlite:///./inventory.db"
+    database_url: str = "postgresql+psycopg://inventory:inventory@localhost:5432/inventory"
     secret_key: str = "change-this-before-production"
     access_token_minutes: int = 30
     refresh_token_days: int = 14
@@ -14,7 +17,14 @@ class Settings(BaseSettings):
     llm_api_key: str | None = None
     llm_model: str = "Llama-V3p2-3b-Reasoning"
     llm_base_url: str = "https://api.nugen.in/api/v3"
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=PROJECT_ROOT / ".env", extra="ignore")
+
+    @field_validator("database_url")
+    @classmethod
+    def require_postgresql(cls, value: str) -> str:
+        if not value.startswith(("postgresql://", "postgresql+psycopg://")):
+            raise ValueError("DATABASE_URL must use PostgreSQL (postgresql:// or postgresql+psycopg://)")
+        return value
 
     @model_validator(mode="after")
     def require_production_secret(self):
