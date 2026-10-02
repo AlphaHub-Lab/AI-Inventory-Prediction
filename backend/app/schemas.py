@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from typing import Any, Optional, Union
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
@@ -19,12 +20,12 @@ class TokenResponse(BaseModel):
 
 
 class UserRead(ORMModel):
-    id: int
+    id: Any
     email: EmailStr
     full_name: str
     role: str
     is_active: bool
-    business_id: int | None = None
+    business_id: Any = None
     business_name: str | None = None
     business_type: str | None = None
 
@@ -34,7 +35,7 @@ class UserCreate(BaseModel):
     full_name: str = Field(min_length=2, max_length=120)
     password: str = Field(min_length=12, max_length=128)
     role: str = Field(default="associate", pattern="^(admin|business_owner|associate)$")
-    business_id: int | None = None
+    business_id: Any = None
 
     @field_validator("password")
     @classmethod
@@ -47,7 +48,7 @@ class UserCreate(BaseModel):
 class AdminUserUpdate(BaseModel):
     role: str = Field(pattern="^(admin|business_owner|associate)$")
     is_active: bool
-    business_id: int | None = None
+    business_id: Any = None
 
 
 class BusinessCreate(BaseModel):

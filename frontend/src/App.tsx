@@ -28,7 +28,7 @@ function App() {
     const hash = window.location.hash.replace(/^#\/?/, '') as PageKey
     return VALID_PAGES.includes(hash) ? hash : 'dashboard'
   })
-  const [checking, setChecking] = useState(Boolean(getToken()))
+  const [checking, setChecking] = useState(true)
 
   const setPage = (newPage: PageKey) => {
     setPageState(newPage)
@@ -47,10 +47,13 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!getToken()) return
+    // Real-time cookie session authentication check on startup
     api<User>('/api/auth/me')
       .then(setUser)
-      .catch(clearSession)
+      .catch(() => {
+        clearSession()
+        setUser(null)
+      })
       .finally(() => setChecking(false))
   }, [])
 

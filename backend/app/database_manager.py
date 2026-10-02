@@ -91,9 +91,16 @@ def get_session_for_db(dbname: str) -> Session:
     return _SESSION_MAKERS[dbname]()
 
 def get_admin_session() -> Session:
-    return get_session_for_db("admin_db")
+    parsed = urlparse(settings.database_url)
+    target = parsed.path.lstrip("/")
+    dbname = os.getenv("ADMIN_DB_NAME") or (target if target in ("inventory_system", "postgres") else "postgres")
+    return get_session_for_db(dbname)
 
 def get_master_session(business_type: str) -> Session:
+    parsed = urlparse(settings.database_url)
+    target = parsed.path.lstrip("/")
+    if target in ("inventory_system", "postgres"):
+        return get_session_for_db(target)
     safe_type = business_type.lower().strip()
     if safe_type not in ["medical", "grocery", "restaurant", "food", "stationery", "dairy"]:
         safe_type = "grocery"
@@ -102,6 +109,10 @@ def get_master_session(business_type: str) -> Session:
     return get_session_for_db(f"master_{safe_type}")
 
 def get_local_session(local_database_name: str) -> Session:
+    parsed = urlparse(settings.database_url)
+    target = parsed.path.lstrip("/")
+    if target in ("inventory_system", "postgres"):
+        return get_session_for_db(target)
     return get_session_for_db(local_database_name)
 
 # DDL for newly provisioned local business databases
@@ -441,6 +452,12 @@ def provision_new_business_database(
     from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
     local_dbname = f"local_business_{business_id}"
+    parsed = urlparse(settings.database_url)
+    target = parsed.path.lstrip("/")
+    if target in ("inventory_system", "postgres"):
+        # In unified database architectures (e.g. Supabase postgres), all local tables exist directly
+        return local_dbname
+
     raw_psycopg_url = BASE_URL.replace("postgresql+psycopg2://", "postgresql://", 1)
     
     # 1. Connect to postgres database to execute CREATE DATABASE

@@ -13,6 +13,7 @@ from .routers.reorders_router import router as reorders_router
 from .routers.catalog_router import router as catalog_router
 from .routers.associate_management_router import router as associate_router
 from .routers.admin_management_router import router as admin_system_router
+from .routers.inventory_system_router import router as inventory_system_router
 from .rate_limit import limiter
 
 settings = get_settings()
@@ -27,15 +28,15 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Cookie"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
 @app.on_event("startup")
 def apply_schema_migrations() -> None:
     import os
-    if os.getenv("SKIP_ALEMBIC_STARTUP") == "1":
+    if os.getenv("SKIP_ALEMBIC_STARTUP") == "1" or settings.skip_alembic_startup or "inventory_system" in settings.database_url:
         return
     try:
         config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
@@ -70,4 +71,5 @@ app.include_router(reorders_router)
 app.include_router(catalog_router)
 app.include_router(associate_router)
 app.include_router(admin_system_router)
+app.include_router(inventory_system_router)
 app.include_router(api)

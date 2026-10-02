@@ -5,10 +5,10 @@ import secrets
 import uuid
 from math import ceil
 from decimal import Decimal, ROUND_HALF_UP
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_, text, update
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from ..db import engine, get_db
 from ..dependencies import get_current_user, oauth2_scheme, require_permission, require_roles
 from ..models import (AuditLog, AuthSession, Business, Category, ChatbotConversation, ChatbotMessage, CheckoutItem, CheckoutTransaction, ExpiryAlert, Forecast, InventoryBatch, InventoryTransaction,
@@ -65,8 +65,8 @@ def sale_data(sale: Sale) -> dict:
 
 
 @api.post("/auth/login", response_model=TokenResponse, tags=["auth"])
-@limiter.limit("5/minute")
-def login(request: Request, body: LoginRequest, db: Session = Depends(get_db)):
+@limiter.limit("15/minute")
+def login(request: Request, body: LoginRequest, response: Response, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == body.email).first()
     if not user or not user.is_active or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
@@ -74,7 +74,51 @@ def login(request: Request, body: LoginRequest, db: Session = Depends(get_db)):
     session_id = secrets.token_urlsafe(32)
     db.add(AuthSession(id=session_id, user_id=user.id, expires_at=datetime.utcnow() + timedelta(days=get_settings().refresh_token_days)))
     db.commit()
-    return {"access_token": create_token(user.email, user.role, session_id), "refresh_token": create_token(user.email, user.role, session_id, "refresh"), "user": user}
+
+    access_token = create_token(user.email, user.role, session_id)
+    refresh_token = create_token(user.email, user.role, session_id, "refresh")
+
+    # Set real-time HTTP-only cookies (zero localStorage required)
+    cookie_max_age = get_settings().refresh_token_days * 86400
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        httponly=True,
+        samesite="lax",
+        max_age=cookie_max_age,
+        secure=False,
+        path="/"
+    )
+    response.set_cookie(
+        key="session_token",
+        value=access_token,
+        httponly=True,
+        samesite="lax",
+        max_age=cookie_max_age,
+        secure=False,
+        path="/"
+    )
+
+    # Sync real-time session into sessions table
+    try:
+        client_ip = request.client.host if request.client else "127.0.0.1"
+        u_agent = request.headers.get("user-agent", "Web Client")
+        exp = datetime.utcnow() + timedelta(days=get_settings().refresh_token_days)
+        db.execute(text("""
+            INSERT INTO sessions (user_id, token, ip_address, user_agent, expires_at, is_active)
+            VALUES (:uid, :tok, :ip, :ua, :exp, true)
+        """), {
+            "uid": user.id,
+            "tok": access_token[:255],
+            "ip": client_ip[:50],
+            "ua": u_agent[:255],
+            "exp": exp
+        })
+        db.commit()
+    except Exception:
+        pass
+
+    return {"access_token": access_token, "refresh_token": refresh_token, "user": user}
 
 
 @api.post("/auth/refresh", tags=["auth"])
@@ -99,16 +143,37 @@ def refresh_token(refresh_token: str, db: Session = Depends(get_db)):
     return {"access_token": create_token(user.email, user.role, session.id), "refresh_token": create_token(user.email, user.role, session.id, "refresh"), "token_type": "bearer"}
 
 
-@api.post("/auth/logout", status_code=204, tags=["auth"])
-def logout(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    from jose import jwt
-    from ..config import get_settings
-    from ..security import ALGORITHM
-    payload = jwt.decode(token, get_settings().secret_key, algorithms=[ALGORITHM])
-    session = db.query(AuthSession).filter_by(id=payload.get("sid"), user_id=user.id, revoked_at=None).first()
-    if session:
-        session.revoked_at = datetime.utcnow()
-        db.commit()
+@api.post("/auth/logout", tags=["auth"])
+def logout(response: Response, request: Request, db: Session = Depends(get_db)):
+    response.delete_cookie(key="access_token", path="/")
+    response.delete_cookie(key="session_token", path="/")
+
+    # Revoke session in auth_sessions and sessions table
+    token = request.cookies.get("access_token") or request.cookies.get("session_token")
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.replace("Bearer ", "").strip()
+
+    if token:
+        try:
+            from jose import jwt
+            from ..config import get_settings
+            from ..security import ALGORITHM
+            payload = jwt.decode(token, get_settings().secret_key, algorithms=[ALGORITHM])
+            session = db.query(AuthSession).filter_by(id=payload.get("sid")).first()
+            if session:
+                session.revoked_at = datetime.utcnow()
+                db.commit()
+        except Exception:
+            pass
+
+        try:
+            db.execute(text("UPDATE sessions SET is_active = false WHERE token = :tok"), {"tok": token[:255]})
+            db.commit()
+        except Exception:
+            pass
+
+    return {"message": "Logged out successfully"}
 
 
 @api.get("/auth/me", response_model=UserRead, tags=["auth"])
@@ -120,9 +185,15 @@ def me(user: User = Depends(get_current_user)):
 def list_users(db: Session = Depends(get_db), actor: User = Depends(get_current_user)):
     if actor.role not in {"admin", "business_owner"}:
         raise HTTPException(403, "Insufficient permissions")
+    users = db.query(User).options(joinedload(User.business)).order_by(User.full_name).all()
+    user_ids = [u.id for u in users]
+    perms = db.query(UserPermission).filter(UserPermission.user_id.in_(user_ids)).order_by(UserPermission.permission).all() if user_ids else []
+    perm_map: dict = {}
+    for p in perms:
+        perm_map.setdefault(p.user_id, []).append(p.permission)
     return [{"id": u.id, "email": u.email, "full_name": u.full_name, "role": u.role, "is_active": u.is_active, "business_id": u.business_id, "business_name": u.business_name,
-             "permissions": [p.permission for p in db.query(UserPermission).filter_by(user_id=u.id).order_by(UserPermission.permission).all()]}
-            for u in db.query(User).order_by(User.full_name).all()]
+             "permissions": perm_map.get(u.id, [])}
+            for u in users]
 
 
 @api.post("/users", status_code=201, tags=["users"])
@@ -199,28 +270,54 @@ def update_admin_user(user_id: int, body: AdminUserUpdate, db: Session = Depends
 
 @api.get("/admin/overview", tags=["administrator"])
 def admin_overview(db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
-    counts = {
-        "businesses": db.query(Business).count(),
-        "accounts": db.query(User).count(),
-        "products": db.query(Product).count(),
-        "sales": db.query(Sale).count(),
-        "inventory_movements": db.query(InventoryTransaction).count(),
-        "batches": db.query(InventoryBatch).count(),
-        "suppliers": db.query(Supplier).count(),
-        "categories": db.query(Category).count(),
-        "purchase_orders": db.query(PurchaseOrder).count(),
-        "purchase_order_items": db.query(PurchaseOrderItem).count(),
-        "forecasts": db.query(Forecast).count(),
-        "reorder_recommendations": db.query(ReorderRecommendation).count(),
-        "waste_predictions": db.query(WastePrediction).count(),
-        "expiry_alerts": db.query(ExpiryAlert).count(),
-        "knowledge_documents": db.query(KnowledgeDocument).count(),
-        "knowledge_chunks": db.query(KnowledgeChunk).count(),
-        "chat_conversations": db.query(ChatbotConversation).count(),
-        "chat_messages": db.query(ChatbotMessage).count(),
-        "audit_events": db.query(AuditLog).count(),
-        "model_runs": db.query(ModelRun).count(),
-    }
+    try:
+        count_sql = text("""
+            SELECT 'businesses' as k, COUNT(*) as c FROM businesses
+            UNION ALL SELECT 'accounts', COUNT(*) FROM users
+            UNION ALL SELECT 'products', COUNT(*) FROM products
+            UNION ALL SELECT 'sales', COUNT(*) FROM sales
+            UNION ALL SELECT 'inventory_movements', COUNT(*) FROM inventory_transactions
+            UNION ALL SELECT 'batches', COUNT(*) FROM inventory_batches
+            UNION ALL SELECT 'suppliers', COUNT(*) FROM suppliers
+            UNION ALL SELECT 'categories', COUNT(*) FROM categories
+            UNION ALL SELECT 'purchase_orders', COUNT(*) FROM purchase_orders
+            UNION ALL SELECT 'purchase_order_items', COUNT(*) FROM purchase_order_items
+            UNION ALL SELECT 'forecasts', COUNT(*) FROM forecasts
+            UNION ALL SELECT 'reorder_recommendations', COUNT(*) FROM reorder_recommendations
+            UNION ALL SELECT 'waste_predictions', COUNT(*) FROM waste_predictions
+            UNION ALL SELECT 'expiry_alerts', COUNT(*) FROM expiry_alerts
+            UNION ALL SELECT 'knowledge_documents', COUNT(*) FROM knowledge_documents
+            UNION ALL SELECT 'knowledge_chunks', COUNT(*) FROM knowledge_chunks
+            UNION ALL SELECT 'chat_conversations', COUNT(*) FROM chatbot_conversations
+            UNION ALL SELECT 'chat_messages', COUNT(*) FROM chatbot_messages
+            UNION ALL SELECT 'audit_events', COUNT(*) FROM audit_logs
+            UNION ALL SELECT 'model_runs', COUNT(*) FROM model_runs
+        """)
+        rows = db.execute(count_sql).fetchall()
+        counts = {r[0]: r[1] for r in rows}
+    except Exception:
+        counts = {
+            "businesses": db.query(Business).count(),
+            "accounts": db.query(User).count(),
+            "products": db.query(Product).count(),
+            "sales": db.query(Sale).count(),
+            "inventory_movements": db.query(InventoryTransaction).count(),
+            "batches": db.query(InventoryBatch).count(),
+            "suppliers": db.query(Supplier).count(),
+            "categories": db.query(Category).count(),
+            "purchase_orders": db.query(PurchaseOrder).count(),
+            "purchase_order_items": db.query(PurchaseOrderItem).count(),
+            "forecasts": db.query(Forecast).count(),
+            "reorder_recommendations": db.query(ReorderRecommendation).count(),
+            "waste_predictions": db.query(WastePrediction).count(),
+            "expiry_alerts": db.query(ExpiryAlert).count(),
+            "knowledge_documents": db.query(KnowledgeDocument).count(),
+            "knowledge_chunks": db.query(KnowledgeChunk).count(),
+            "chat_conversations": db.query(ChatbotConversation).count(),
+            "chat_messages": db.query(ChatbotMessage).count(),
+            "audit_events": db.query(AuditLog).count(),
+            "model_runs": db.query(ModelRun).count(),
+        }
     active_accounts = db.query(User).filter_by(is_active=True).count()
     revenue = db.query(func.coalesce(func.sum(Sale.revenue), 0)).scalar() or 0
     dialect = engine.dialect.name
@@ -498,7 +595,7 @@ def update_supplier(supplier_id: int, body: SupplierInput, db: Session = Depends
 
 @api.get("/products", tags=["products"])
 def list_products(q: str | None = None, category_id: int | None = None, low_stock: bool = False, page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), db: Session = Depends(get_db), _: User = Depends(require_permission("inventory.view"))):
-    query = db.query(Product)
+    query = db.query(Product).options(joinedload(Product.category), joinedload(Product.supplier))
     if q: query = query.filter(or_(Product.name.ilike(f"%{q}%"), Product.sku.ilike(f"%{q}%")))
     if category_id: query = query.filter(Product.category_id == category_id)
     if low_stock: query = query.filter(Product.current_stock <= Product.reorder_point)

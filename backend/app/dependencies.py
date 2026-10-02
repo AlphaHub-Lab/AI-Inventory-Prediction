@@ -34,7 +34,7 @@ def get_current_user(
     """
     auth_token = token
     if not auth_token:
-        auth_token = request.cookies.get("session_token")
+        auth_token = request.cookies.get("session_token") or request.cookies.get("access_token")
     if not auth_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

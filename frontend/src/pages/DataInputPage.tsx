@@ -40,8 +40,6 @@ export default function DataInputPage() {
     const minimum = Number(f.get('minimum'))
     try {
       await api('/api/products', { method: 'POST', body: JSON.stringify({ sku: f.get('sku'), name: f.get('name'), category_id: Number(f.get('category')), supplier_id: Number(f.get('supplier')), price: Number(f.get('price')), current_stock: Number(f.get('stock')), minimum_stock: minimum, maximum_stock: Math.max(200, Number(f.get('stock'))), reorder_point: minimum, safety_stock: minimum, lead_time_days: 3, unit: 'unit', status: 'active' }) })
-      const cost = Number(f.get('cost'))
-      if (cost > 0) { const costs = JSON.parse(localStorage.getItem('stockwise_unit_costs') || '{}') as Record<string, number>; costs[String(f.get('sku'))] = cost; localStorage.setItem('stockwise_unit_costs', JSON.stringify(costs)) }
       formElement.reset(); await done('Product added to the live catalog.')
     } catch (err) { fail(err) }
   }

@@ -20,7 +20,7 @@ import {
   Upload,
   X
 } from 'lucide-react'
-import { api } from '../lib/api'
+import { api, getToken } from '../lib/api'
 import type { ReceiptImport, ReceiptItem, User } from '../types'
 
 export default function ReceiptsPage({ currentUser }: { currentUser: User }) {
@@ -91,12 +91,13 @@ export default function ReceiptsPage({ currentUser }: { currentUser: User }) {
     formData.append('file', file)
 
     try {
-      const token = localStorage.getItem('token') || sessionStorage.getItem('token')
+      const token = getToken()
+      const headers: Record<string, string> = {}
+      if (token) headers['Authorization'] = `Bearer ${token}`
       const response = await fetch('/api/receipts/upload', {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`
-        },
+        headers,
+        credentials: 'include',
         body: formData
       })
 
