@@ -33,6 +33,8 @@ class ReceiptItemUpdate(BaseModel):
     master_product_id: Optional[str] = None
     quantity: float = Field(gt=0, default=1.0)
     unit: str = "unit"
+    barcode: Optional[str] = None
+    serial_number: Optional[str] = None
     purchase_price: float = Field(ge=0, default=0.0)
     mrp: Optional[float] = None
     gst_percentage: float = Field(ge=0, le=100, default=5.0)
@@ -59,9 +61,9 @@ async def upload_and_process_receipt(
     master_db: Session = Depends(get_master_db),
 ):
     """
-    Upload a receipt image or PDF.
-    Validates file, extracts text/data via OCR/Vision pipeline,
-    fuzzy-matches products against Local and Master databases,
+    Upload a receipt image, PDF, CSV, Excel, or text invoice.
+    Validates file, extracts text/data via OCR/Vision/Spreadsheet pipeline,
+    fuzzy-matches products against Local and Master databases (with Barcode priority),
     and stages the receipt in review_required status for human verification.
     """
     file_bytes = await file.read()
@@ -73,7 +75,7 @@ async def upload_and_process_receipt(
         raw_text = extract_text_from_pdf(file_bytes)
 
     business_type = getattr(user, "business_type_val", "grocery") or "grocery"
-    parsed_data = parse_receipt_text_or_vision(raw_text, file.filename or "receipt", business_type)
+    parsed_data = parse_receipt_text_or_vision(raw_text, file.filename or "receipt", business_type, file_bytes=file_bytes)
 
     # Multi-signal matching against local DB and master DB
     matched_items = match_items_with_catalogs(parsed_data["items"], local_db, master_db)
@@ -165,7 +167,7 @@ def get_receipt_import_detail(
         SELECT id, raw_product_name, matched_product_id, match_source,
                master_product_id, quantity, unit, mrp, purchase_price,
                gst_percentage, batch_number, expiry_date, confidence_score,
-               confidence_level, review_status
+               confidence_level, review_status, barcode, serial_number
         FROM receipt_import_items
         WHERE receipt_import_id = :id
         ORDER BY id ASC
@@ -200,6 +202,8 @@ def get_receipt_import_detail(
             "confidence_score": float(i[12] or 0),
             "confidence_level": i[13],
             "review_status": i[14],
+            "barcode": i[15],
+            "serial_number": i[16],
         } for i in items]
     }
 

@@ -52,7 +52,7 @@ class AdminUserUpdate(BaseModel):
 
 class BusinessCreate(BaseModel):
     name: str = Field(min_length=2, max_length=180)
-    business_type: str = Field(pattern="^(medical|grocery|restaurant|stationery|dairy)$")
+    business_type: str = Field(pattern="^(medical|grocery|restaurant|food|stationery|dairy|clothing|others)$")
     owner_name: str = Field(min_length=2, max_length=120)
     owner_email: EmailStr
     owner_password: str = Field(min_length=12, max_length=128)
@@ -71,7 +71,7 @@ class PermissionUpdate(BaseModel):
 
 class BusinessStatusUpdate(BaseModel):
     is_active: bool
-    business_type: str | None = Field(default=None, pattern="^(medical|grocery|restaurant|stationery|dairy)$")
+    business_type: str | None = Field(default=None, pattern="^(medical|grocery|restaurant|food|stationery|dairy|clothing|others)$")
 
 
 class SupplierInput(BaseModel):

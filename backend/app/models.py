@@ -13,7 +13,7 @@ class TimestampMixin:
 
 class Business(Base):
     __tablename__ = "businesses"
-    __table_args__ = (CheckConstraint("business_type IN ('medical', 'grocery', 'restaurant', 'stationery', 'dairy')", name="ck_businesses_supported_type"),)
+    __table_args__ = (CheckConstraint("business_type IN ('medical', 'grocery', 'restaurant', 'food', 'stationery', 'dairy', 'clothing', 'others')", name="ck_businesses_supported_type"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(180), index=True)
     business_type: Mapped[str] = mapped_column(String(30), default="grocery", index=True)

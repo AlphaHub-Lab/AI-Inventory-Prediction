@@ -60,7 +60,7 @@ def health():
         "environment": settings.environment,
         "database": "Supabase PostgreSQL Multi-Tenant",
         "roles": ["admin", "business_owner", "associate"],
-        "business_types": ["medical", "grocery", "restaurant", "stationery", "dairy"]
+        "business_types": ["grocery", "medical", "stationery", "restaurant", "food", "dairy", "clothing", "others"]
     }
 
 

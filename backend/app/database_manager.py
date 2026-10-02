@@ -36,6 +36,7 @@ def get_base_postgres_url() -> str:
 BASE_URL = get_base_postgres_url()
 _ENGINES: Dict[str, Engine] = {}
 _SESSION_MAKERS: Dict[str, sessionmaker] = {}
+_ENSURED_TENANT_SCHEMAS: set = set()
 
 def get_engine_for_db(dbname: str) -> Engine:
     """Get or create a pooled SQLAlchemy engine for a specific database."""
@@ -54,6 +55,34 @@ def get_engine_for_db(dbname: str) -> Engine:
             autoflush=False,
             bind=_ENGINES[safe_dbname]
         )
+    if safe_dbname.startswith("local_business_") and safe_dbname not in _ENSURED_TENANT_SCHEMAS:
+        try:
+            with _ENGINES[safe_dbname].connect() as conn:
+                conn.execute(text("ALTER TABLE reorder_list ADD COLUMN IF NOT EXISTS reason TEXT;"))
+                conn.execute(text("ALTER TABLE reorder_list ADD COLUMN IF NOT EXISTS received_quantity NUMERIC(14,2) DEFAULT 0;"))
+                conn.execute(text("ALTER TABLE reorder_list ADD COLUMN IF NOT EXISTS target_stock NUMERIC(14,2) DEFAULT 0;"))
+                conn.execute(text("ALTER TABLE reorder_list ADD COLUMN IF NOT EXISTS notes TEXT;"))
+                conn.execute(text("ALTER TABLE receipt_import_items ADD COLUMN IF NOT EXISTS barcode VARCHAR(100);"))
+                conn.execute(text("ALTER TABLE receipt_import_items ADD COLUMN IF NOT EXISTS serial_number VARCHAR(100);"))
+                conn.execute(text("ALTER TABLE receipt_import_items ADD COLUMN IF NOT EXISTS size VARCHAR(50);"))
+                conn.execute(text("ALTER TABLE receipt_import_items ADD COLUMN IF NOT EXISTS color VARCHAR(50);"))
+                conn.execute(text("ALTER TABLE receipt_import_items ADD COLUMN IF NOT EXISTS variant_name VARCHAR(150);"))
+                conn.execute(text("ALTER TABLE receipt_import_items ADD COLUMN IF NOT EXISTS custom_attributes JSONB DEFAULT '{}'::jsonb;"))
+                conn.execute(text("ALTER TABLE receipt_import_items ADD COLUMN IF NOT EXISTS error_message TEXT;"))
+                conn.execute(text("ALTER TABLE inventory_batches ADD COLUMN IF NOT EXISTS serial_number VARCHAR(100);"))
+                conn.execute(text("ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS file_hash VARCHAR(64);"))
+                conn.execute(text("ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS duplicate_warning BOOLEAN DEFAULT FALSE;"))
+                conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS size VARCHAR(50);"))
+                conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS color VARCHAR(50);"))
+                conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS style VARCHAR(100);"))
+                conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS variant_name VARCHAR(150);"))
+                conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS target_stock NUMERIC(14,2) DEFAULT 0;"))
+                conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS custom_attributes JSONB DEFAULT '{}'::jsonb;"))
+                conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS parent_product_id INT REFERENCES products(id) ON DELETE SET NULL;"))
+                conn.commit()
+            _ENSURED_TENANT_SCHEMAS.add(safe_dbname)
+        except Exception:
+            pass
     return _ENGINES[safe_dbname]
 
 def get_session_for_db(dbname: str) -> Session:
@@ -66,6 +95,10 @@ def get_admin_session() -> Session:
 
 def get_master_session(business_type: str) -> Session:
     safe_type = business_type.lower().strip()
+    if safe_type not in ["medical", "grocery", "restaurant", "food", "stationery", "dairy"]:
+        safe_type = "grocery"
+    elif safe_type == "food":
+        safe_type = "restaurant"
     return get_session_for_db(f"master_{safe_type}")
 
 def get_local_session(local_database_name: str) -> Session:
@@ -152,6 +185,13 @@ CREATE TABLE IF NOT EXISTS products (
     expiry_required BOOLEAN DEFAULT FALSE,
     storage_temperature VARCHAR(100),
     shelf_life VARCHAR(100),
+    size VARCHAR(50),
+    color VARCHAR(50),
+    style VARCHAR(100),
+    variant_name VARCHAR(150),
+    target_stock NUMERIC(14,2) DEFAULT 0,
+    custom_attributes JSONB DEFAULT '{}'::jsonb,
+    parent_product_id INT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -166,6 +206,7 @@ CREATE TABLE IF NOT EXISTS inventory_batches (
     id SERIAL PRIMARY KEY,
     product_id INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     lot_number VARCHAR(100) NOT NULL,
+    serial_number VARCHAR(100),
     quantity NUMERIC(14,2) NOT NULL DEFAULT 0,
     cost_price NUMERIC(12,2) DEFAULT 0,
     manufacturing_date DATE,
@@ -266,6 +307,10 @@ CREATE TABLE IF NOT EXISTS reorder_list (
     average_order_quantity NUMERIC(14,2) DEFAULT 0,
     status VARCHAR(50) DEFAULT 'pending',
     source VARCHAR(50) DEFAULT 'low_stock',
+    reason TEXT DEFAULT 'low_stock',
+    received_quantity NUMERIC(14,2) NOT NULL DEFAULT 0,
+    target_stock NUMERIC(14,2) NOT NULL DEFAULT 0,
+    notes TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(product_id)
@@ -299,6 +344,8 @@ CREATE TABLE IF NOT EXISTS receipt_imports (
     id SERIAL PRIMARY KEY,
     file_name VARCHAR(255) NOT NULL,
     file_path VARCHAR(500),
+    file_hash VARCHAR(64),
+    duplicate_warning BOOLEAN DEFAULT FALSE,
     uploaded_by VARCHAR(150),
     supplier_id INT REFERENCES suppliers(id) ON DELETE SET NULL,
     supplier_name_extracted VARCHAR(255),
@@ -324,6 +371,13 @@ CREATE TABLE IF NOT EXISTS receipt_import_items (
     master_product_id VARCHAR(100),
     quantity NUMERIC(14,2) NOT NULL DEFAULT 1,
     unit VARCHAR(50),
+    barcode VARCHAR(100),
+    serial_number VARCHAR(100),
+    size VARCHAR(50),
+    color VARCHAR(50),
+    variant_name VARCHAR(150),
+    custom_attributes JSONB DEFAULT '{}'::jsonb,
+    error_message TEXT,
     mrp NUMERIC(12,2),
     purchase_price NUMERIC(12,2) NOT NULL DEFAULT 0,
     gst_percentage NUMERIC(5,2) DEFAULT 0,

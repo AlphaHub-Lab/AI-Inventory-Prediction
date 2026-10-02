@@ -23,7 +23,7 @@ router = APIRouter(prefix="/api/admin-system", tags=["System Administrator"])
 
 class BusinessCreateExtended(BaseModel):
     name: str = Field(min_length=2, max_length=180)
-    business_type: str = Field(pattern="^(medical|grocery|restaurant|stationery|dairy)$")
+    business_type: str = Field(pattern="^(medical|grocery|restaurant|food|stationery|dairy|clothing|others)$")
     owner_name: str = Field(min_length=2, max_length=120)
     owner_email: EmailStr
     owner_password: str = Field(min_length=8, max_length=128)

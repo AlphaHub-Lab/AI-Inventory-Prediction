@@ -10,5 +10,6 @@ frontend/dist/
 data/benchmark_results.json
 ml/artifacts/
 *.log
+.pytest_cache/
 .DS_Store
 Thumbs.db
