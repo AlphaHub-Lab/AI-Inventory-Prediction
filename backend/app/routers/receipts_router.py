@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from ..database_manager import get_admin_session, get_local_session, get_master_session
 from ..dependencies import get_admin_db, get_current_user, get_local_db, get_master_db, require_receipt_ai
 from ..models import User
+from ..rate_limit import limiter
 from ..services.receipt_service import (
     execute_atomic_receipt_confirmation,
     extract_text_from_pdf,
@@ -54,7 +55,9 @@ class ReceiptConfirmPayload(BaseModel):
 
 
 @router.post("/upload", status_code=201)
+@limiter.limit("10/minute")
 async def upload_and_process_receipt(
+    request: Request,
     file: UploadFile = File(...),
     user: User = Depends(require_receipt_ai),
     local_db: Session = Depends(get_local_db),
@@ -209,7 +212,9 @@ def get_receipt_import_detail(
 
 
 @router.post("/{import_id}/confirm")
+@limiter.limit("10/minute")
 def confirm_and_import(
+    request: Request,
     import_id: int,
     payload: ReceiptConfirmPayload,
     user: User = Depends(require_receipt_ai),

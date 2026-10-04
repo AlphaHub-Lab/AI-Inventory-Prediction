@@ -85,9 +85,9 @@ def tool_inventory(db: Session, message: str) -> tuple[str, dict]:
 
 
 def tool_low_stock(db: Session) -> tuple[str, dict]:
-    products = db.query(Product).filter(Product.current_stock <= Product.reorder_point, Product.status == "active").order_by(Product.current_stock).all()
+    products = db.query(Product).filter(Product.is_weight_based.is_(False), Product.reorder_point > 0, Product.current_stock * 5 < Product.reorder_point, Product.status == "active").order_by(Product.current_stock).all()
     if not products:
-        return "No active products are currently at or below their reorder point.", {"products": []}
+        return "No active products are below 20% of their reorder threshold.", {"products": []}
     labels = [f"{p.name} ({p.current_stock}/{p.reorder_point})" for p in products[:8]]
     return f"{len(products)} product(s) need attention: " + ", ".join(labels) + ".", {"products": [p.id for p in products]}
 
@@ -129,11 +129,11 @@ def tool_reorder(db: Session, message: str) -> tuple[str, dict]:
         recommendation = build_reorder(db, product)
         db.commit()
         return recommendation.explanation, {"recommendation_id": recommendation.id, "quantity": recommendation.recommended_quantity}
-    rows = db.query(Product).filter(Product.current_stock <= Product.reorder_point).all()
+    rows = db.query(Product).filter(Product.is_weight_based.is_(False), Product.reorder_point > 0, Product.current_stock * 5 < Product.reorder_point).all()
     recommendations = [build_reorder(db, p) for p in rows]
     db.commit()
     if not recommendations:
-        return "There are no products currently at or below their reorder point.", {"recommendations": []}
+        return "No products are below 20% of their reorder threshold.", {"recommendations": []}
     return "Recommended orders: " + "; ".join(f"{db.get(Product, r.product_id).name}: {r.recommended_quantity}" for r in recommendations[:8]) + ".", {"recommendations": [r.id for r in recommendations]}
 
 

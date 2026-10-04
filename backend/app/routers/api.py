@@ -1,13 +1,14 @@
 from datetime import date, datetime, timedelta
 from io import StringIO
 import csv
+import re
 import secrets
 import uuid
 from math import ceil
 from decimal import Decimal, ROUND_HALF_UP
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, or_, text, update
+from sqlalchemy import case, func, or_, text, update
 from sqlalchemy.orm import Session, joinedload
 from ..db import engine, get_db
 from ..dependencies import get_current_user, oauth2_scheme, require_permission, require_roles
@@ -116,7 +117,12 @@ def login(request: Request, body: LoginRequest, response: Response, db: Session 
         })
         db.commit()
     except Exception:
-        pass
+        # This secondary legacy `sessions` table is optional. If it is absent
+        # (as on the current admin_db schema), PostgreSQL marks the transaction
+        # failed; roll it back so response serialization can still load the
+        # user's business relationship. The primary auth_sessions row was
+        # committed above and remains the authoritative revocable session.
+        db.rollback()
 
     return {"access_token": access_token, "refresh_token": refresh_token, "user": user}
 
@@ -369,7 +375,7 @@ def admin_dashboard(
     category_rows = category_rows.group_by(Category.name).order_by(func.sum(Sale.revenue).desc()).all()
 
     product_scope = Product.id.in_(product_ids) if product_ids else False
-    low_stock = sum(product.current_stock <= product.reorder_point for product in products)
+    low_stock = sum(not product.is_weight_based and product.reorder_point > 0 and product.current_stock * 5 < product.reorder_point for product in products)
     expected_demand = db.query(func.coalesce(func.sum(Sale.quantity_sold), 0)).join(Product, Sale.product_id == Product.id).filter(
         Sale.date >= end - timedelta(days=27), Sale.date <= end, product_scope
     ).scalar() or 0
@@ -382,19 +388,32 @@ def admin_dashboard(
         accounts_query = accounts_query.filter(User.business_id == business_id)
 
     business_rows = db.query(Business).order_by(Business.name).all()
+    business_product_stats = {
+        business_key: (int(product_count), int(low_count))
+        for business_key, product_count, low_count in db.query(
+            Product.business_id,
+            func.count(Product.id),
+            func.coalesce(func.sum(case((Product.is_weight_based.is_(False), case((Product.reorder_point > 0, case((Product.current_stock * 5 < Product.reorder_point, 1), else_=0)), else_=0)), else_=0)), 0),
+        ).filter(Product.status == "active").group_by(Product.business_id).all()
+    }
+    business_account_counts = dict(db.query(User.business_id, func.count(User.id)).group_by(User.business_id).all())
+    branch_sales_query = db.query(
+        Product.business_id, func.coalesce(func.sum(Sale.revenue), 0), func.count(Sale.id)
+    ).join(Product, Sale.product_id == Product.id).filter(Sale.date >= start, Sale.date <= end)
+    if category:
+        branch_sales_query = branch_sales_query.join(Category, Product.category_id == Category.id).filter(Category.name == category)
+    branch_sales_stats = {business_key: (float(branch_revenue or 0), int(branch_transactions))
+                          for business_key, branch_revenue, branch_transactions in branch_sales_query.group_by(Product.business_id).all()}
     business_performance = []
     for business in business_rows:
-        branch_products = db.query(Product).filter(Product.business_id == business.id, Product.status == "active").all()
-        branch_sales = db.query(func.coalesce(func.sum(Sale.revenue), 0), func.count(Sale.id)).join(Product, Sale.product_id == Product.id).filter(Product.business_id == business.id, Sale.date >= start, Sale.date <= end)
-        if category:
-            branch_sales = branch_sales.join(Category, Product.category_id == Category.id).filter(Category.name == category)
-        branch_revenue, branch_transactions = branch_sales.one()
+        product_count, low_count = business_product_stats.get(business.id, (0, 0))
+        branch_revenue, branch_transactions = branch_sales_stats.get(business.id, (0.0, 0))
         business_performance.append({
             "id": business.id, "name": business.name, "owner_email": business.owner_email,
             "is_active": business.is_active,
-            "accounts": db.query(User).filter(User.business_id == business.id).count(),
-            "products": len(branch_products),
-            "low_stock": sum(p.current_stock <= p.reorder_point for p in branch_products),
+            "accounts": business_account_counts.get(business.id, 0),
+            "products": product_count,
+            "low_stock": low_count,
             "transactions": branch_transactions,
             "revenue": float(branch_revenue or 0),
         })
@@ -420,14 +439,17 @@ def admin_dashboard(
 @api.get("/admin/businesses", tags=["administrator"])
 def admin_businesses(db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
     rows = db.query(Business).order_by(Business.created_at.desc()).all()
+    account_counts = dict(db.query(User.business_id, func.count(User.id)).group_by(User.business_id).all())
+    product_counts = dict(db.query(Product.business_id, func.count(Product.id)).group_by(Product.business_id).all())
+    sales_counts = dict(db.query(Product.business_id, func.count(Sale.id)).join(Product, Sale.product_id == Product.id).group_by(Product.business_id).all())
     return [{
         "id": business.id, "name": business.name, "business_type": business.business_type,
         "master_database_name": business.master_database_name, "local_database_name": business.local_database_name,
         "owner_email": business.owner_email,
         "is_active": business.is_active, "created_at": business.created_at,
-        "accounts": db.query(User).filter_by(business_id=business.id).count(),
-        "products": db.query(Product).filter_by(business_id=business.id).count(),
-        "sales": db.query(Sale).filter_by(business_id=business.id).count(),
+        "accounts": account_counts.get(business.id, 0),
+        "products": product_counts.get(business.id, 0),
+        "sales": sales_counts.get(business.id, 0),
     } for business in rows]
 
 
@@ -472,7 +494,7 @@ def admin_notifications(db: Session = Depends(get_db), _: User = Depends(require
     alerts = []
     cutoff = date.today() + timedelta(days=7)
     for business in db.query(Business).order_by(Business.name).all():
-        low_stock = db.query(Product).filter(Product.business_id == business.id, Product.status == "active", Product.current_stock <= Product.reorder_point).count()
+        low_stock = db.query(Product).filter(Product.business_id == business.id, Product.status == "active", Product.is_weight_based.is_(False), Product.reorder_point > 0, Product.current_stock * 5 < Product.reorder_point).count()
         expiring = db.query(Product).filter(Product.business_id == business.id, Product.expiry_date.is_not(None), Product.expiry_date <= cutoff).count()
         open_orders = db.query(PurchaseOrder).filter(PurchaseOrder.business_id == business.id, PurchaseOrder.status.in_(["draft", "approved", "ordered"])).count()
         if not business.is_active:
@@ -506,6 +528,121 @@ def admin_accounts(db: Session = Depends(get_db), _: User = Depends(require_role
     } for user in users]
 
 
+@api.delete("/admin/accounts/{user_id}", tags=["administrator"])
+def delete_admin_account(user_id: int, db: Session = Depends(get_db), actor: User = Depends(require_roles("admin"))):
+    """Permanently remove an account and its personal authentication/assistant data."""
+    target = db.query(User).filter(User.id == user_id).with_for_update().first()
+    if not target:
+        raise HTTPException(404, "Account not found")
+    if target.id == actor.id:
+        raise HTTPException(400, "You cannot delete your own administrator account")
+    if target.role == "admin" and target.is_active:
+        active_admins = db.query(User).filter(User.role == "admin", User.is_active.is_(True)).count()
+        if active_admins <= 1:
+            raise HTTPException(409, "The last active administrator cannot be deleted")
+
+    from sqlalchemy import Integer, inspect as sa_inspect
+    from ..database_manager import get_local_session
+
+    # Local operational records are shared workspace history. Detach the account
+    # identity from those records while retaining products, orders, receipts, and audit history.
+    local_sessions: list[Session] = []
+    local_names = {name for (name,) in db.query(Business.local_database_name).filter(Business.local_database_name.is_not(None)).all() if name}
+    # Legacy single-database deployments route every tenant session to the
+    # configured database; scan it once to avoid duplicate concurrent updates.
+    if engine.url.database in {"postgres", "inventory_system"} and local_names:
+        local_names = {engine.url.database}
+    local_refs = {
+        "audit_logs": ("user_id",),
+        "purchase_orders": ("created_by",),
+        "receipt_imports": ("uploaded_by", "confirmed_by"),
+        "receipt_import_items": ("edited_by",),
+    }
+
+    def anonymize(value):
+        if isinstance(value, dict):
+            return {key: anonymize(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [anonymize(item) for item in value]
+        if isinstance(value, str) and value.casefold() in {target.email.casefold(), target.full_name.casefold()}:
+            return "[deleted account]"
+        return value
+
+    try:
+        for database_name in sorted(local_names):
+            local_db = get_local_session(database_name)
+            local_sessions.append(local_db)
+            inspector = sa_inspect(local_db.get_bind())
+            for table_name, candidates in local_refs.items():
+                if not inspector.has_table(table_name):
+                    continue
+                columns = {column["name"]: column for column in inspector.get_columns(table_name)}
+                if table_name == "audit_logs" and "metadata" in columns:
+                    for log_id, details in local_db.execute(text('SELECT id, "metadata" FROM audit_logs')).all():
+                        cleaned = anonymize(details)
+                        if cleaned != details:
+                            local_db.execute(text('UPDATE audit_logs SET "metadata" = :details WHERE id = :log_id'), {"details": cleaned, "log_id": log_id})
+                for column_name in candidates:
+                    column = columns.get(column_name)
+                    if not column or not column.get("nullable", True):
+                        continue
+                    # Validate identifiers strictly against safe identifier regex to guarantee SQL safety
+                    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table_name) or not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", column_name):
+                        continue
+                    if isinstance(column["type"], Integer):
+                        predicate = f'"{column_name}" = :user_id'
+                        params = {"user_id": target.id}
+                    else:
+                        predicate = f'"{column_name}" IN (:user_id_text, :email)'
+                        params = {"user_id_text": str(target.id), "email": target.email}
+                    local_db.execute(text(f'UPDATE "{table_name}" SET "{column_name}" = NULL WHERE {predicate}'), params)
+
+        # Preserve permission grants and operational audit trails, but remove the
+        # deleted user's own permissions, sessions, stock actor links, and chats.
+        conversation_ids = [row[0] for row in db.query(ChatbotConversation.id).filter(ChatbotConversation.user_id == target.id).all()]
+        if conversation_ids:
+            db.query(ChatbotMessage).filter(ChatbotMessage.conversation_id.in_(conversation_ids)).delete(synchronize_session=False)
+            db.query(ChatbotConversation).filter(ChatbotConversation.id.in_(conversation_ids)).delete(synchronize_session=False)
+        db.query(AuthSession).filter(AuthSession.user_id == target.id).delete(synchronize_session=False)
+        db.query(UserPermission).filter(UserPermission.user_id == target.id).delete(synchronize_session=False)
+        db.query(UserPermission).filter(UserPermission.granted_by == target.id).update({UserPermission.granted_by: None}, synchronize_session=False)
+        db.query(AuditLog).filter(AuditLog.user_id == target.id).update({AuditLog.user_id: None}, synchronize_session=False)
+        db.query(InventoryTransaction).filter(InventoryTransaction.user_id == target.id).update({InventoryTransaction.user_id: None}, synchronize_session=False)
+        db.query(PurchaseOrder).filter(PurchaseOrder.created_by == target.id).update({PurchaseOrder.created_by: None}, synchronize_session=False)
+
+        # Historical activity is kept for accountability, with the account's
+        # identity removed from both its actor link and matching payload values.
+        for event in db.query(AuditLog).all():
+            if event.payload:
+                event.payload = anonymize(event.payload)
+
+        # Business workspaces survive account deletion; remove the deleted owner's
+        # contact address from the workspace metadata.
+        owned_businesses = db.query(Business).filter(func.lower(Business.owner_email) == target.email.lower()).all()
+        for business in owned_businesses:
+            business.owner_email = f"deleted-owner-{business.id}@deleted.invalid"
+
+        audit(db, actor, "delete", "user", target.id, {"deleted_user_id": target.id})
+        db.delete(target)
+        for local_db in local_sessions:
+            local_db.commit()
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        for local_db in local_sessions:
+            local_db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        for local_db in local_sessions:
+            local_db.rollback()
+        raise HTTPException(503, "Could not safely remove this account from all registered databases") from exc
+    finally:
+        for local_db in local_sessions:
+            local_db.close()
+    return {"ok": True, "deleted_user_id": user_id}
+
+
 @api.get("/admin/activity", tags=["administrator"])
 def admin_activity(limit: int = Query(100, ge=1, le=500), db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
     rows = db.query(AuditLog, User.full_name, User.email).outerjoin(User, AuditLog.user_id == User.id).order_by(AuditLog.created_at.desc()).limit(limit).all()
@@ -514,33 +651,6 @@ def admin_activity(limit: int = Query(100, ge=1, le=500), db: Session = Depends(
         "action": event.action, "entity": event.entity, "entity_id": event.entity_id,
         "details": event.payload or {}, "created_at": event.created_at,
     } for event, full_name, email in rows]
-
-
-@api.get("/admin/records", tags=["administrator"])
-def admin_records(
-    resource: str = Query(...), offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500),
-    db: Session = Depends(get_db), _: User = Depends(require_roles("admin")),
-):
-    models = {
-        "accounts": User, "products": Product, "sales": Sale, "inventory_movements": InventoryTransaction,
-        "batches": InventoryBatch, "categories": Category, "suppliers": Supplier, "purchase_orders": PurchaseOrder,
-        "purchase_order_items": PurchaseOrderItem, "forecasts": Forecast, "reorder_recommendations": ReorderRecommendation,
-        "waste_predictions": WastePrediction, "expiry_alerts": ExpiryAlert, "knowledge_documents": KnowledgeDocument,
-        "knowledge_chunks": KnowledgeChunk, "chat_conversations": ChatbotConversation, "chat_messages": ChatbotMessage,
-        "audit_events": AuditLog, "model_runs": ModelRun,
-    }
-    model = models.get(resource)
-    if not model:
-        raise HTTPException(422, "Unknown administrator data resource")
-    query = db.query(model)
-    total = query.count()
-    order_column = model.date if resource == "sales" else model.id
-    rows = query.order_by(order_column.desc()).offset(offset).limit(limit).all()
-    columns = [column for column in model.__table__.columns if not (resource == "accounts" and column.key == "password_hash")]
-    return {
-        "resource": resource, "total": total, "offset": offset, "limit": limit,
-        "items": [{column.key: getattr(row, column.key) for column in columns} for row in rows],
-    }
 
 
 @api.get("/categories", tags=["catalog"])
@@ -598,18 +708,25 @@ def list_products(q: str | None = None, category_id: int | None = None, low_stoc
     query = db.query(Product).options(joinedload(Product.category), joinedload(Product.supplier))
     if q: query = query.filter(or_(Product.name.ilike(f"%{q}%"), Product.sku.ilike(f"%{q}%")))
     if category_id: query = query.filter(Product.category_id == category_id)
-    if low_stock: query = query.filter(Product.current_stock <= Product.reorder_point)
+    if low_stock: query = query.filter(Product.is_weight_based.is_(False), Product.reorder_point > 0, Product.current_stock * 5 < Product.reorder_point)
     total = query.count(); rows = query.order_by(Product.name).offset((page-1)*page_size).limit(page_size).all()
     return {"items": [product_data(p) for p in rows], "total": total, "page": page, "page_size": page_size}
 
 
 @api.post("/products", status_code=201, tags=["products"])
 def create_product(body: ProductInput, db: Session = Depends(get_db), user: User = Depends(require_permission("inventory.create"))):
-    if db.query(Product).filter_by(sku=body.sku).first(): raise HTTPException(409, "SKU already exists")
     category = db.get(Category, body.category_id)
     if not category or not db.get(Supplier, body.supplier_id): raise HTTPException(422, "Category or supplier does not exist")
     validate_product_weight(body, category)
-    item = Product(**body.model_dump()); db.add(item); db.flush(); audit(db, user, "create", "product", item.id); db.commit(); db.refresh(item); return product_data(item)
+    business_id = user.business_id
+    # Serialize sequence allocation per business. The existing composite
+    # unique constraint remains the final guard against duplicate SKUs.
+    if business_id is not None:
+        db.query(Business).filter(Business.id == business_id).with_for_update().first()
+    existing_skus = db.query(Product.sku).filter(Product.business_id == business_id).all()
+    serials = [int(match.group(1)) for (sku,) in existing_skus if sku and (match := re.fullmatch(r"SKU-(\d+)", sku, re.IGNORECASE))]
+    sku = f"SKU-{max(serials, default=0) + 1:04d}"
+    item = Product(**{**body.model_dump(exclude={"sku"}), "sku": sku}); db.add(item); db.flush(); audit(db, user, "create", "product", item.id); db.commit(); db.refresh(item); return product_data(item)
 
 
 @api.get("/products/{product_id}", tags=["products"])
@@ -628,7 +745,7 @@ def update_product(product_id: int, body: ProductInput, db: Session = Depends(ge
     category = db.get(Category, body.category_id)
     if not category: raise HTTPException(422, "Category does not exist")
     validate_product_weight(body, category)
-    for field, value in body.model_dump().items(): setattr(product, field, value)
+    for field, value in body.model_dump(exclude={"sku"}).items(): setattr(product, field, value)
     audit(db, user, "update", "product", product.id); db.commit(); db.refresh(product); return product_data(product)
 
 
@@ -645,6 +762,8 @@ def adjust_stock(product_id: int, body: StockAdjustment, db: Session = Depends(g
     if not product: raise HTTPException(404, "Product not found")
     if product.current_stock + body.quantity_delta < 0: raise HTTPException(422, "Adjustment would produce negative stock")
     product.current_stock += body.quantity_delta
+    if body.transaction_type == "receipt" and body.quantity_delta > 0:
+        product.reorder_point += body.quantity_delta
     tx = InventoryTransaction(product_id=product_id, quantity_delta=body.quantity_delta, transaction_type=body.transaction_type, note=body.note, user_id=user.id)
     db.add(tx); audit(db, user, "stock_adjustment", "product", product.id, {"delta": body.quantity_delta, "type": body.transaction_type}); db.commit()
     return {"product_id": product_id, "current_stock": product.current_stock, "transaction_id": tx.id}
@@ -690,6 +809,7 @@ def receive_batches(body: BulkBatchInput | BatchInput, db: Session = Depends(get
         )
         db.add(batch)
         product.current_stock += b.quantity
+        product.reorder_point += b.quantity
         if b.expiry_date and (not product.expiry_date or b.expiry_date < product.expiry_date):
             product.expiry_date = b.expiry_date
         tx = InventoryTransaction(
@@ -993,12 +1113,75 @@ def dashboard(start: date | None = None, end: date | None = None, category_id: i
     reorders = db.query(ReorderRecommendation).filter(ReorderRecommendation.status == "draft", ReorderRecommendation.product_id.in_(ids) if ids else False).count()
     trend = db.query(Sale.date, func.sum(Sale.revenue).label("revenue"), func.sum(Sale.quantity_sold).label("units")).filter(Sale.date >= start, Sale.date <= end).group_by(Sale.date).order_by(Sale.date).all()
     by_category = db.query(Category.name, func.sum(Sale.revenue)).join(Product, Product.category_id == Category.id).join(Sale, Sale.product_id == Product.id).filter(Sale.date >= start, Sale.date <= end).group_by(Category.name).all()
-    return {"last_updated": datetime.utcnow(), "range": {"start": start, "end": end}, "kpis": {"total_products": len(products), "low_stock_products": sum(p.current_stock <= p.reorder_point for p in products), "expiring_soon_products": sum(bool(p.expiry_date and p.expiry_date <= date.today()+timedelta(days=7)) for p in products), "predicted_waste_value": round(sum(float(w.estimated_value) for w in wastes), 2), "expected_demand": expected, "recommended_orders": reorders, "revenue": round(revenue, 2), "inventory_value": round(sum(p.current_stock * float(p.price) for p in products), 2)}, "sales_trend": [{"date": d, "revenue": float(r), "units": int(u)} for d, r, u in trend], "category_sales": [{"name": n, "value": float(v)} for n, v in by_category]}
+    return {"last_updated": datetime.utcnow(), "range": {"start": start, "end": end}, "kpis": {"total_products": len(products), "low_stock_products": sum(not p.is_weight_based and p.reorder_point > 0 and p.current_stock * 5 < p.reorder_point for p in products), "expiring_soon_products": sum(bool(p.expiry_date and p.expiry_date <= date.today()+timedelta(days=7)) for p in products), "predicted_waste_value": round(sum(float(w.estimated_value) for w in wastes), 2), "expected_demand": expected, "recommended_orders": reorders, "revenue": round(revenue, 2), "inventory_value": round(sum(p.current_stock * float(p.price) for p in products), 2)}, "sales_trend": [{"date": d, "revenue": float(r), "units": int(u)} for d, r, u in trend], "category_sales": [{"name": n, "value": float(v)} for n, v in by_category]}
 
 
 @api.get("/analytics/suppliers", tags=["analytics"])
 def supplier_analytics(db: Session = Depends(get_db), _: User = Depends(require_permission("reports.view"))):
     return [{"supplier": s.name, "lead_time_days": s.lead_time_days, "reliability_score": s.reliability_score, "products": len(s.products), "open_orders": db.query(PurchaseOrder).filter(PurchaseOrder.supplier_id == s.id, PurchaseOrder.status.in_(["draft", "approved", "ordered"])).count()} for s in db.query(Supplier).all()]
+
+
+@api.get("/forecasts", tags=["forecasts"])
+def list_forecasts(
+    horizon_days: int = Query(default=14, ge=1, le=60),
+    product_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+    _: User = Depends(require_permission("ai.forecast"))
+):
+    query = db.query(Forecast)
+    if product_id:
+        query = query.filter(Forecast.product_id == product_id)
+    if horizon_days:
+        query = query.filter(Forecast.horizon_days == horizon_days)
+
+    today = date.today()
+    rows = query.filter(Forecast.forecast_date >= today).order_by(Forecast.forecast_date.asc()).limit(300).all()
+
+    if not rows:
+        rows = query.order_by(Forecast.forecast_date.desc()).limit(300).all()
+
+    product_ids = {f.product_id for f in rows}
+    products = {p.id: p for p in db.query(Product).filter(Product.id.in_(product_ids)).all()} if product_ids else {}
+
+    return [
+        {
+            "id": f.id,
+            "product_id": f.product_id,
+            "product_name": products[f.product_id].name if f.product_id in products else f"Product #{f.product_id}",
+            "sku": products[f.product_id].sku if f.product_id in products else "—",
+            "forecast_date": f.forecast_date.isoformat() if f.forecast_date else None,
+            "predicted_quantity": float(f.predicted_quantity),
+            "horizon_days": f.horizon_days,
+            "model_name": f.model_name,
+            "model_version": f.model_version,
+            "created_at": f.created_at.isoformat() if f.created_at else None,
+        }
+        for f in rows
+    ]
+
+
+@api.post("/forecasts/generate", tags=["forecasts"])
+@limiter.limit("10/minute")
+def generate_forecasts(
+    request: Request,
+    body: ForecastRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("admin", "business_owner", "associate")),
+    _: User = Depends(require_permission("ai.forecast"))
+):
+    horizon = body.horizon_days or 14
+    query = db.query(Product).filter(Product.status == "active")
+    if body.product_id:
+        query = query.filter(Product.id == body.product_id)
+    products = query.all()
+
+    total_generated = 0
+    for p in products:
+        results = forecast_product(db, p, horizon_days=horizon, persist=True)
+        total_generated += len(results)
+
+    audit(db, user, "generate_forecasts", "forecasts", "batch", {"horizon_days": horizon, "products_count": len(products), "records_generated": total_generated})
+    return {"generated": total_generated, "horizon_days": horizon}
 
 
 @api.get("/waste", tags=["waste"])
@@ -1110,6 +1293,7 @@ def receive_po(po_id: int, db: Session = Depends(get_db), user: User = Depends(r
         if product:
             lot = f"PO{po.id}-LOT{item.id}"
             product.current_stock += item.quantity
+            product.reorder_point += item.quantity
             expiry = date.today() + timedelta(days=90)
             batch = InventoryBatch(product_id=product.id, lot_number=lot, quantity=item.quantity, received_date=date.today(), expiry_date=expiry)
             db.add(batch)

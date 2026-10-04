@@ -111,7 +111,8 @@ class CategoryRead(CategoryInput, ORMModel):
 
 
 class ProductInput(BaseModel):
-    sku: str = Field(min_length=2, max_length=50)
+    # SKU is assigned by the API so each business has its own serial sequence.
+    sku: str | None = Field(default=None, min_length=2, max_length=50)
     name: str = Field(min_length=2, max_length=180)
     category_id: int
     unit: str = "unit"

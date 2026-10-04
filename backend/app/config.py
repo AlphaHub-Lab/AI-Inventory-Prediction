@@ -29,8 +29,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def require_production_secret(self):
-        if self.environment.lower() in {"production", "prod"} and (len(self.secret_key) < 32 or self.secret_key in {"change-this-before-production", "replace-with-a-long-random-secret"}):
-            raise ValueError("Set SECRET_KEY to a unique random value of at least 32 characters in production")
+        if self.environment.lower() in {"production", "prod"}:
+            if len(self.secret_key) < 32 or self.secret_key in {"change-this-before-production", "replace-with-a-long-random-secret"}:
+                raise ValueError("Set SECRET_KEY to a unique random value of at least 32 characters in production")
+        elif self.secret_key in {"change-this-before-production", "replace-with-a-long-random-secret"}:
+            import warnings
+            warnings.warn("Using default insecure SECRET_KEY in development. Please set a unique SECRET_KEY in your .env file.", UserWarning, stacklevel=2)
         return self
 
     @property

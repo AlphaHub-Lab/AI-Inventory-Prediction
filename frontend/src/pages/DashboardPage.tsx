@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { CartesianGrid, Cell, Legend, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { AlertTriangle, Calendar, Filter, IndianRupee, PackageCheck, Plus, RefreshCw, ShoppingBag } from 'lucide-react'
 import { api } from '../lib/api'
+import LoadingState from '../components/LoadingState'
 import type { Dashboard } from '../types'
 import type { PageKey } from '../components/Layout'
 
@@ -69,7 +70,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: Page
     }
   }
 
-  if (loading && !data) return <div className="loading">Loading live operational signals…</div>
+  if (loading && !data) return <LoadingState label="Loading business overview…" />
   if (error && !data) return <div className="error-state">{error}</div>
   if (!data) return null
 
@@ -77,7 +78,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate?: (page: Page
 
   const allCards = [
     { key: 'total_products', label: 'Active Products', value: k.total_products.toLocaleString(), sub: 'Live in catalog', icon: PackageCheck, color: '#16745b', target: 'products' as PageKey },
-    { key: 'low_stock_products', label: 'Low-Stock Items', value: k.low_stock_products.toLocaleString(), sub: 'At or below reorder point', icon: AlertTriangle, color: '#bf731e', target: 'products' as PageKey },
+    { key: 'low_stock_products', label: 'Low-Stock Items', value: k.low_stock_products.toLocaleString(), sub: 'Below 20% of reorder threshold', icon: AlertTriangle, color: '#bf731e', target: 'products' as PageKey },
     { key: 'revenue', label: 'Revenue, Last 30 Days', value: `₹${k.revenue.toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}`, sub: 'From recorded sales', icon: IndianRupee, color: '#16745b', target: 'sales' as PageKey },
     { key: 'recommended_orders', label: 'Recommended Orders', value: k.recommended_orders.toLocaleString(), sub: 'Awaiting approval', icon: ShoppingBag, color: '#53766c', target: 'reorders' as PageKey },
   ]

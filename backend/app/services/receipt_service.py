@@ -1029,6 +1029,7 @@ def execute_atomic_receipt_confirmation(
                     local_db.execute(text("""
                         UPDATE products
                         SET current_stock = :new_stock,
+                            reorder_level = reorder_level + :received_quantity,
                             purchase_price = :cost,
                             mrp = :mrp,
                             gst_percentage = :gst,
@@ -1037,6 +1038,7 @@ def execute_atomic_receipt_confirmation(
                         WHERE id = :id
                     """), {
                         "new_stock": new_stock,
+                        "received_quantity": qty,
                         "cost": cost,
                         "mrp": mrp,
                         "gst": gst_pct,

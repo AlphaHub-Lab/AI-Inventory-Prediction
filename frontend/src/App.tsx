@@ -1,20 +1,21 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import Layout, { type PageKey } from './components/Layout'
-import { api, clearSession, getToken } from './lib/api'
+import { api, clearSession } from './lib/api'
 import type { User } from './types'
 import LoginPage from './pages/LoginPage'
-import DashboardPage from './pages/DashboardPage'
-import AdminDashboardPage from './pages/AdminDashboardPage'
-import ProductsPage from './pages/ProductsPage'
-import DataPage from './pages/DataPage'
-import ChatPage from './pages/ChatPage'
-import DataInputPage from './pages/DataInputPage'
-import AdminPage from './pages/AdminPage'
-import CheckoutPage from './pages/CheckoutPage'
-import ReorderPage from './pages/ReorderPage'
-import ReceiptsPage from './pages/ReceiptsPage'
+const DashboardPage = lazy(() => import('./pages/DashboardPage'))
+const AdminDashboardPage = lazy(() => import('./pages/AdminDashboardPage'))
+const ProductsPage = lazy(() => import('./pages/ProductsPage'))
+const DataPage = lazy(() => import('./pages/DataPage'))
+const ChatPage = lazy(() => import('./pages/ChatPage'))
+const DataInputPage = lazy(() => import('./pages/DataInputPage'))
+const AdminPage = lazy(() => import('./pages/AdminPage'))
+const CheckoutPage = lazy(() => import('./pages/CheckoutPage'))
+const ReorderPage = lazy(() => import('./pages/ReorderPage'))
+const ReceiptsPage = lazy(() => import('./pages/ReceiptsPage'))
 
 import ErrorBoundary from './components/ErrorBoundary'
+import LoadingState from './components/LoadingState'
 
 const VALID_PAGES: PageKey[] = [
   'dashboard', 'data-input', 'products', 'inventory', 'checkout', 'sales', 'receipts', 'forecasts',
@@ -65,11 +66,11 @@ function App() {
     setPage('dashboard')
   }
 
-  if (checking) return <div className="boot-screen">Connecting securely to Stockwise AI…</div>
+  if (checking) return <LoadingState className="boot-screen" label="Connecting securely to Stockwise AI…" />
   if (!user) return <LoginPage onLogin={setUser}/>
 
   const activePage = user.role === 'admin'
-    ? (page === 'admin' ? 'admin' : 'dashboard')
+    ? (page === 'admin' || page === 'settings' ? page : 'dashboard')
     : (page === 'admin' ? 'dashboard' : page)
   let view: React.ReactNode
   if (activePage === 'dashboard' && user.role === 'admin') view = <AdminDashboardPage onNavigate={setPage}/>
@@ -86,7 +87,9 @@ function App() {
   return (
     <Layout page={activePage} setPage={setPage} user={user} onLogout={logout}>
       <ErrorBoundary>
-        {view}
+        <Suspense fallback={<LoadingState label="Loading workspace…" />}>
+          {view}
+        </Suspense>
       </ErrorBoundary>
     </Layout>
   )

@@ -20,11 +20,13 @@ settings = get_settings()
 def get_base_postgres_url() -> str:
     """Extract base connection URL without database name."""
     raw_url = settings.database_url
-    # Ensure psycopg2 driver if postgresql://
+    # The backend requirements install psycopg v3 (`psycopg[binary]`). Keep
+    # all per-database engines on that driver rather than rewriting URLs to
+    # psycopg2, which is not installed in this project environment.
     if raw_url.startswith("postgresql://"):
-        raw_url = raw_url.replace("postgresql://", "postgresql+psycopg2://", 1)
-    elif raw_url.startswith("postgresql+psycopg://"):
-        raw_url = raw_url.replace("postgresql+psycopg://", "postgresql+psycopg2://", 1)
+        raw_url = raw_url.replace("postgresql://", "postgresql+psycopg://", 1)
+    elif raw_url.startswith("postgresql+psycopg2://"):
+        raw_url = raw_url.replace("postgresql+psycopg2://", "postgresql+psycopg://", 1)
 
     parsed = urlparse(raw_url)
     # url without path
@@ -48,7 +50,8 @@ def get_engine_for_db(dbname: str) -> Engine:
             pool_size=5,
             max_overflow=10,
             pool_pre_ping=True,
-            pool_recycle=300
+            pool_recycle=300,
+            connect_args={"connect_timeout": 5}
         )
         _SESSION_MAKERS[safe_dbname] = sessionmaker(
             autocommit=False,
@@ -93,7 +96,9 @@ def get_session_for_db(dbname: str) -> Session:
 def get_admin_session() -> Session:
     parsed = urlparse(settings.database_url)
     target = parsed.path.lstrip("/")
-    dbname = os.getenv("ADMIN_DB_NAME") or (target if target in ("inventory_system", "postgres") else "postgres")
+    # DATABASE_URL names the central app database in this physical-DB setup.
+    # Preserve that name (normally admin_db) unless explicitly overridden.
+    dbname = os.getenv("ADMIN_DB_NAME") or target or "admin_db"
     return get_session_for_db(dbname)
 
 def get_master_session(business_type: str) -> Session:

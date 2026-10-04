@@ -25,6 +25,7 @@ import {
 } from 'lucide-react'
 import { api } from '../lib/api'
 import { StatusBadge } from '../components/StatusBadge'
+import LoadingState from '../components/LoadingState'
 
 type Item = Record<string, unknown>
 type SystemInfo = {
@@ -367,6 +368,7 @@ export default function DataPage({ kind, currentUser }: { kind: string; currentU
   ), [items, search])
 
   // SETTINGS VIEW
+  if (kind === 'settings' && loading && !systemInfo) return <LoadingState label="Loading system settings…" />
   if (kind === 'settings') {
     return (
       <>
@@ -698,7 +700,7 @@ export default function DataPage({ kind, currentUser }: { kind: string; currentU
         </div>
 
         {loading ? (
-          <div className="loading">Loading records…</div>
+          <LoadingState label="Loading records…" />
         ) : !filtered.length ? (
           <div className="empty-state">No records match the current view.</div>
         ) : kind === 'reorders' ? (

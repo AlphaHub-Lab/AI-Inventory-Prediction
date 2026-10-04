@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Activity, AlertTriangle, Building2, Database, IndianRupee, PackageCheck, RefreshCw, ShieldCheck, Users } from 'lucide-react'
 import { CartesianGrid, Cell, Legend, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { api } from '../lib/api'
+import LoadingState from '../components/LoadingState'
 import type { PageKey } from '../components/Layout'
 
 type AdminDashboardData = {
@@ -50,7 +51,7 @@ export default function AdminDashboardPage({ onNavigate }: { onNavigate: (page: 
   const cards = stats ? [
     { label: 'Active businesses', value: stats.businesses.toLocaleString(), sub: 'Platform-wide workspaces', icon: Building2, tone: 'green' },
     { label: 'Active products', value: stats.products.toLocaleString(), sub: 'Across selected scope', icon: PackageCheck, tone: 'mint' },
-    { label: 'Low-stock items', value: stats.low_stock.toLocaleString(), sub: 'At or below reorder point', icon: AlertTriangle, tone: 'orange' },
+    { label: 'Low-stock items', value: stats.low_stock.toLocaleString(), sub: 'Below 20% of reorder threshold', icon: AlertTriangle, tone: 'orange' },
     { label: `Revenue · ${days} days`, value: `₹${stats.revenue.toLocaleString('en-IN', { maximumFractionDigits: 1 })}`, sub: 'Recorded sales across workspaces', icon: IndianRupee, tone: 'blue' },
   ] : []
 
@@ -74,7 +75,7 @@ export default function AdminDashboardPage({ onNavigate }: { onNavigate: (page: 
     </section>
 
     {error && <div className="error-state" role="alert">{error}</div>}
-    {loading && !data && <div className="loading">Loading cross-business signals…</div>}
+    {loading && !data && <LoadingState label="Loading cross-business overview…" />}
     {data && <>
       <section className="kpi-grid global-kpis">
         {cards.map(({ label, value, sub, icon: Icon, tone }) => <article className="kpi-card global-kpi" key={label}>

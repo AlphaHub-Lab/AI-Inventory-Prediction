@@ -22,6 +22,7 @@ import {
 } from 'lucide-react'
 import { api, getToken } from '../lib/api'
 import type { ReceiptImport, ReceiptItem, User } from '../types'
+import LoadingState from '../components/LoadingState'
 
 export default function ReceiptsPage({ currentUser }: { currentUser: User }) {
   const [imports, setImports] = useState<ReceiptImport[]>([])
@@ -52,7 +53,7 @@ export default function ReceiptsPage({ currentUser }: { currentUser: User }) {
       // If there's an import requiring review, load it automatically
       const pending = res.find((r) => r.processing_status === 'review_required')
       if (pending && !activeImport) {
-        loadReceiptDetail(pending.id)
+        await loadReceiptDetail(pending.id)
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch receipts')
@@ -198,8 +199,10 @@ export default function ReceiptsPage({ currentUser }: { currentUser: User }) {
   )
   const computedGrandTotal = computedSubtotal + computedGst
 
+  if (loading && !imports.length && !activeImport) return <LoadingState label="Loading receipt workspace…" />
+
   return (
-    <div className="receipts-page space-y-6 p-4 md:p-6 max-w-7xl mx-auto">
+    <div className="receipts-page theme-workspace space-y-6 p-4 md:p-6 max-w-7xl mx-auto">
       {/* Top Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-700/60 pb-5">
         <div>

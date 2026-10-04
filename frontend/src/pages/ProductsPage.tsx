@@ -14,6 +14,7 @@ import {
 import { api } from '../lib/api'
 import type { InventoryBatch, MasterCatalogItem, Product } from '../types'
 import { StatusBadge } from '../components/StatusBadge'
+import LoadingState from '../components/LoadingState'
 
 type Category = {
   id: number
@@ -36,6 +37,7 @@ export default function ProductsPage() {
   const [showBatchModal, setShowBatchModal] = useState(false)
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null)
   const [productBatches, setProductBatches] = useState<InventoryBatch[]>([])
+  const [loadingProducts, setLoadingProducts] = useState(true)
   const [loadingBatches, setLoadingBatches] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
@@ -57,14 +59,24 @@ export default function ProductsPage() {
 
   const selectedCategory = categories.find((c) => String(c.id) === categoryId) || categories[0]
 
-  const load = () =>
-    api<{ items: Product[] }>('/api/products?page_size=100')
-      .then((r) => setProducts(r.items))
-      .catch((e) => setError(e.message))
+  const load = async () => {
+    setLoadingProducts(true)
+    try {
+      const response = await api<{ items: Product[] }>('/api/products?page_size=100')
+      setProducts(response.items)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not load products.')
+    } finally {
+      setLoadingProducts(false)
+    }
+  }
 
   useEffect(() => {
     load()
-    api<Category[]>('/api/categories').then(setCategories).catch(() => {})
+    api<Category[]>('/api/categories').then((rows) => {
+      setCategories(rows)
+      if (rows.length > 0) setCategoryId(String(rows[0].id))
+    }).catch(() => {})
     api<Supplier[]>('/api/suppliers').then((sups) => {
       setSuppliers(sups)
       if (sups.length > 0) setImportSupplierId(sups[0].id)
@@ -131,13 +143,12 @@ export default function ProductsPage() {
     setError('')
     const form = new FormData(event.currentTarget)
     const body = {
-      sku: String(form.get('sku')),
       name: String(form.get('name')),
       category_id: Number(form.get('category')),
       supplier_id: Number(form.get('supplier')),
       price: Number(form.get('price')),
-      minimum_stock: Number(form.get('minimum')),
-      maximum_stock: Number(form.get('maximum')),
+      minimum_stock: Number(form.get('minimum') ?? form.get('reorder')),
+      maximum_stock: Number(form.get('maximum') ?? form.get('reorder')),
       reorder_point: Number(form.get('reorder')),
       safety_stock: Number(form.get('safety')),
       lead_time_days: Number(form.get('lead')),
@@ -163,10 +174,10 @@ export default function ProductsPage() {
       current_stock: weightBased ? 0 : Number(form.get('stock'))
     }
     try {
-      await api('/api/products', { method: 'POST', body: JSON.stringify(body) })
+      const created = await api<Product>('/api/products', { method: 'POST', body: JSON.stringify(body) })
       setShowProductForm(false)
-      setSuccess('Product successfully created.')
-      load()
+      setSuccess(`Product created with SKU ${created.sku}.`)
+      await load()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not create product')
     }
@@ -283,6 +294,40 @@ export default function ProductsPage() {
           </button>
         </div>
       )}
+
+      {/* Add product form stays in the inventory page so the catalog remains visible. */}
+      {showProductForm && (
+        <section className="panel" style={{ padding: 20, marginBottom: 18 }} aria-labelledby="add-product-heading">
+          <div className="section-heading" style={{ marginBottom: 16 }}>
+            <div>
+              <p className="eyebrow">LOCAL INVENTORY</p>
+              <h2 id="add-product-heading">Add Custom Local Product</h2>
+              <p className="subtle-text">The SKU is generated automatically per business. Incoming receipts add to both current stock and the reorder threshold.</p>
+            </div>
+            <button className="secondary-button" type="button" onClick={() => setShowProductForm(false)}>Cancel</button>
+          </div>
+          <form onSubmit={createProduct} style={{ display: 'grid', gap: 12 }}>
+            <div className="form-grid">
+              <label>Product Name<input name="name" required placeholder="Product Name" /></label>
+              <label>SKU<input value="Generated automatically on save" readOnly aria-label="SKU generated automatically" /></label>
+              <label>Category<select name="category" value={categoryId} onChange={(e) => setCategoryId(e.target.value)} required>{categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>
+              <label>Supplier<select name="supplier" required>{suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</select></label>
+              <label>Selling Price (₹)<input name="price" type="number" step="0.01" min="0.01" required /></label>
+              <label>Initial Stock<input name="stock" type="number" min="0" required defaultValue="10" /></label>
+              <label>Reorder Threshold<input name="reorder" type="number" min="0" required defaultValue="10" /></label>
+              <label>Minimum Stock<input name="minimum" type="number" min="0" required defaultValue="10" /></label>
+              <label>Maximum Stock<input name="maximum" type="number" min="0" required defaultValue="100" /></label>
+              <label>Safety Stock<input name="safety" type="number" min="0" required defaultValue="5" /></label>
+              <label>Supplier Lead Time (days)<input name="lead" type="number" min="0" required defaultValue="3" /></label>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
+              <button type="button" className="secondary-button" onClick={() => setShowProductForm(false)}>Cancel</button>
+              <button type="submit" className="primary-button">Save Product</button>
+            </div>
+          </form>
+        </section>
+      )}
+
 
       {/* Import to Local Store Modal */}
       {importingProduct && (
@@ -499,13 +544,13 @@ export default function ProductsPage() {
                   <th>Category</th>
                   <th>Supplier</th>
                   <th>Current Stock</th>
-                  <th>Reorder Point</th>
+                  <th>Reorder Threshold</th>
                   <th>Unit Price</th>
                   <th>Status</th>
                 </tr>
               </thead>
               <tbody>
-                {shown.map((p) => (
+                {loadingProducts ? <tr><td colSpan={7}><LoadingState label="Loading products…" /></td></tr> : shown.map((p) => (
                   <tr
                     key={p.id}
                     className="clickable-row"
@@ -518,18 +563,19 @@ export default function ProductsPage() {
                     </td>
                     <td>{p.category_name || p.category || 'General'}</td>
                     <td>{p.supplier_name || 'Primary Supplier'}</td>
-                    <td className={p.is_weight_based ? '' : p.current_stock <= p.reorder_point ? 'danger-text' : ''}>
+                    <td className={p.is_weight_based ? '' : p.reorder_point > 0 && p.current_stock * 5 < p.reorder_point ? 'danger-text' : ''}>
                       {p.is_weight_based
                         ? `${((p.weight_stock_g || 0) / 1000).toFixed(3).replace(/\.?0+$/, '')} kg`
-                        : `${p.current_stock} ${p.unit}`}
+                        : `${p.current_stock}/${p.reorder_point} ${p.unit}`}
                     </td>
                     <td>{p.reorder_point}</td>
                     <td>₹{p.price}{p.is_weight_based ? ' / kg' : ''}</td>
                     <td>
-                      <StatusBadge value={p.current_stock <= p.reorder_point ? 'LOW' : p.status} />
+                      <StatusBadge value={!p.is_weight_based && p.reorder_point > 0 && p.current_stock * 5 < p.reorder_point ? 'LOW' : p.status} />
                     </td>
                   </tr>
                 ))}
+                {!loadingProducts && !shown.length && <tr><td colSpan={7} className="empty-row">No products match your search.</td></tr>}
               </tbody>
             </table>
           </div>
@@ -554,8 +600,8 @@ export default function ProductsPage() {
             <div className="detail-metrics">
               <div className="detail-card">
                 <span className="card-label">Current Stock</span>
-                <span className={`card-value ${selectedProduct.current_stock <= selectedProduct.reorder_point ? 'danger-text' : ''}`}>
-                  {selectedProduct.current_stock}
+                <span className={`card-value ${!selectedProduct.is_weight_based && selectedProduct.reorder_point > 0 && selectedProduct.current_stock * 5 < selectedProduct.reorder_point ? 'danger-text' : ''}`}>
+                  {selectedProduct.current_stock}/{selectedProduct.reorder_point}
                 </span>
                 <small>{selectedProduct.unit}</small>
               </div>
@@ -678,81 +724,6 @@ export default function ProductsPage() {
         </div>
       )}
 
-      {/* Add Custom Product Modal */}
-      {showProductForm && (
-        <div className="modal-backdrop">
-          <div className="modal" style={{ maxWidth: 540 }}>
-            <div className="modal-header">
-              <h2>Add Custom Local Product</h2>
-              <button className="icon-button" onClick={() => setShowProductForm(false)}>
-                <X size={17} />
-              </button>
-            </div>
-            <form onSubmit={createProduct} style={{ display: 'grid', gap: 10 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                <label>
-                  Product Name
-                  <input name="name" required placeholder="Product Name" />
-                </label>
-                <label>
-                  SKU
-                  <input name="sku" required placeholder="SKU-1001" />
-                </label>
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                <label>
-                  Category
-                  <select name="category" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
-                    {categories.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Supplier
-                  <select name="supplier">
-                    {suppliers.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                <label>
-                  Selling Price (₹)
-                  <input name="price" type="number" step="0.01" required />
-                </label>
-                <label>
-                  Initial Stock
-                  <input name="stock" type="number" min="0" required defaultValue="10" />
-                </label>
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                <label>
-                  Reorder Level
-                  <input name="reorder" type="number" min="1" required defaultValue="10" />
-                </label>
-                <label>
-                  Safety Stock
-                  <input name="safety" type="number" min="0" required defaultValue="5" />
-                </label>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 10 }}>
-                <button type="button" className="secondary-button" onClick={() => setShowProductForm(false)}>
-                  Cancel
-                </button>
-                <button type="submit" className="primary-button">
-                  Save Product
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </>
   )
 }

@@ -25,7 +25,7 @@ import json
 import uuid
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -33,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from ..database_manager import get_master_session
 from ..dependencies import get_current_user, get_local_db, get_master_db, require_permission
+from ..rate_limit import limiter
 from ..models import User
 from ..services.receipt_service import (
     check_duplicate_delivery,
@@ -53,7 +54,15 @@ router = APIRouter(prefix="/api/reorders", tags=["Reorder List"])
 
 
 class ReorderItemInput(BaseModel):
-    product_id: int
+    product_id: Optional[int] = None
+    product_name: Optional[str] = Field(None, min_length=2, max_length=255)
+    product_unit: Optional[str] = Field(None, min_length=1, max_length=50)
+    product_category: Optional[str] = Field(None, max_length=150)
+    product_size: Optional[str] = Field(None, max_length=50)
+    product_color: Optional[str] = Field(None, max_length=50)
+    product_style: Optional[str] = Field(None, max_length=100)
+    supplier_name: Optional[str] = Field(None, max_length=255)
+    purchase_price: Optional[float] = Field(None, ge=0)
     supplier_id: Optional[int] = None
     suggested_quantity: float = Field(default=10.0, gt=0)
     selected_quantity: float = Field(default=10.0, gt=0)
@@ -131,7 +140,7 @@ class WholesalerConfirmRequest(BaseModel):
 def sync_reorder_stock(local_db: Session, business_type: str = "grocery") -> int:
     """
     Scans local business inventory according to store capability:
-    1. Condition A: Low Stock (current_stock <= reorder_level)
+    1. Condition A: Low Stock (current stock is below 20% of reorder level)
     2. Condition B: Expired Stock (expiry_date <= CURRENT_DATE and quantity > 0)
     3. Condition C: Expiring Soon Stock (expiry_date <= CURRENT_DATE + warning_days)
        * Expiry checks only apply if store capability allows expiry (skipped for clothing/stationery).
@@ -178,7 +187,7 @@ def sync_reorder_stock(local_db: Session, business_type: str = "grocery") -> int
     low_rows = local_db.execute(text("""
         SELECT p.id, p.current_stock, p.reorder_level, p.supplier_id, p.purchase_price, p.unit, p.target_stock
         FROM products p
-        WHERE p.current_stock <= p.reorder_level AND p.status = 'active'
+        WHERE p.reorder_level > 0 AND p.current_stock * 5 < p.reorder_level AND p.status = 'active'
     """)).fetchall()
     low_map = {
         r[0]: {
@@ -314,7 +323,9 @@ def sync_reorder_stock(local_db: Session, business_type: str = "grocery") -> int
 
 
 @router.post("/auto-populate")
+@limiter.limit("10/minute")
 def trigger_auto_populate(
+    request: Request,
     user: User = Depends(require_permission("reorder.create")),
     local_db: Session = Depends(get_local_db)
 ):
@@ -393,13 +404,7 @@ def get_reorder_overview(
     b_type = getattr(user, "business_type_val", "grocery") or "grocery"
     cap = get_store_capability(b_type)
 
-    # 1. Auto-sync inventory on overview read
-    try:
-        sync_reorder_stock(local_db, b_type)
-    except Exception as e:
-        print(f"Warning in sync_reorder_stock: {e}")
-
-    # 2. Low Stock Products
+    # 1. Low Stock Products (read-only, auto-sync is triggered via POST /auto-populate)
     low_stock_rows = local_db.execute(text("""
         SELECT p.id, p.sku, p.barcode, p.product_name, p.brand, p.category, p.current_stock,
                p.reorder_level, p.target_stock, p.purchase_price, p.selling_price, p.supplier_id,
@@ -408,8 +413,9 @@ def get_reorder_overview(
                (SELECT pur.purchase_date FROM purchases pur JOIN purchase_items pi ON pur.id = pi.purchase_id WHERE pi.product_id = p.id ORDER BY pur.id DESC LIMIT 1) as last_date
         FROM products p
         LEFT JOIN suppliers s ON p.supplier_id = s.id
-        WHERE p.current_stock <= p.reorder_level AND p.status = 'active'
+        WHERE p.reorder_level > 0 AND p.current_stock * 5 < p.reorder_level AND p.status = 'active'
         ORDER BY (p.current_stock - p.reorder_level) ASC
+        LIMIT 100
     """)).fetchall()
 
     low_stock = [{
@@ -458,6 +464,7 @@ def get_reorder_overview(
             GROUP BY p.id, p.sku, p.barcode, p.product_name, p.brand, p.category, p.current_stock,
                      p.reorder_level, p.purchase_price, p.selling_price, p.supplier_id, s.name, p.unit, p.pack_size
             ORDER BY earliest_expiry ASC
+            LIMIT 100
         """)).fetchall()
 
         expired_stock = [{
@@ -500,6 +507,7 @@ def get_reorder_overview(
                 GROUP BY p.id, p.sku, p.barcode, p.product_name, p.brand, p.category, p.current_stock,
                          p.reorder_level, p.purchase_price, p.supplier_id, s.name, p.unit, p.pack_size
                 ORDER BY earliest_exp ASC
+                LIMIT 100
             """), {"cutoff": cutoff}).fetchall()
 
             expiring_soon_stock = [{
@@ -933,7 +941,9 @@ def export_reorder_csv(
 
 
 @router.post("/item")
+@limiter.limit("20/minute")
 def add_to_reorder(
+    request: Request,
     body: ReorderItemInput,
     user: User = Depends(require_permission("reorder.create")),
     local_db: Session = Depends(get_local_db)
@@ -946,6 +956,48 @@ def add_to_reorder(
     """
     b_type = getattr(user, "business_type_val", "grocery") or "grocery"
     valid_qty = validate_store_item_quantity(b_type, body.selected_quantity)
+
+    if body.product_id is None:
+        if not body.product_name or not body.product_name.strip():
+            raise HTTPException(422, "Choose a catalog product or enter a new product name.")
+        local_db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"), {
+            # Each tenant has its own local database, so the lock only needs to
+            # serialize SKU allocation within this database.
+            "lock_key": "local-product-sku-sequence"
+        })
+        existing_skus = local_db.execute(text("SELECT sku FROM products WHERE sku ~* '^SKU-[0-9]+$'")).fetchall()
+        serials = [int(match.group(1)) for (sku,) in existing_skus if sku and (match := re.fullmatch(r"SKU-(\d+)", sku, re.IGNORECASE))]
+        generated_sku = f"SKU-{max(serials, default=0) + 1:04d}"
+        supplier_id = None
+        if body.supplier_name and body.supplier_name.strip():
+            name = body.supplier_name.strip()
+            supplier_row = local_db.execute(text("SELECT id FROM suppliers WHERE lower(name) = lower(:name)"), {"name": name}).fetchone()
+            if supplier_row:
+                supplier_id = supplier_row[0]
+            else:
+                supplier_id = local_db.execute(text("INSERT INTO suppliers (name) VALUES (:name) RETURNING id"), {"name": name}).scalar()
+        product_id = local_db.execute(text("""
+            INSERT INTO products (
+                sku, product_name, unit, current_stock, reorder_level, minimum_stock,
+                maximum_stock, selling_price, purchase_price, supplier_id, category,
+                size, color, style, variant_name, status
+            ) VALUES (
+                :sku, :name, :unit, 0, 0, 0, 500, 0, :purchase_price, :supplier_id,
+                :category, :size, :color, :style, :variant_name, 'active'
+            ) RETURNING id
+        """), {
+            "sku": generated_sku,
+            "name": body.product_name.strip(),
+            "unit": body.product_unit or "unit",
+            "purchase_price": body.purchase_price or 0,
+            "supplier_id": supplier_id,
+            "category": body.product_category,
+            "size": body.product_size,
+            "color": body.product_color,
+            "style": body.product_style,
+            "variant_name": " ".join(value for value in (body.product_color, body.product_size) if value) or None,
+        }).scalar()
+        body.product_id = int(product_id)
 
     prod = local_db.execute(
         text("""
@@ -1081,7 +1133,9 @@ def remove_reorder_item(
 
 
 @router.post("/receive")
+@limiter.limit("20/minute")
 def receive_reorder_stock_into_inventory(
+    request: Request,
     body: ReceiveStockInput,
     user: User = Depends(require_permission("reorder.update")),
     local_db: Session = Depends(get_local_db)
@@ -1137,6 +1191,7 @@ def receive_reorder_stock_into_inventory(
             local_db.execute(text("""
                 UPDATE products
                 SET current_stock = :new_stock,
+                    reorder_level = reorder_level + :received_quantity,
                     purchase_price = CASE WHEN :cost > 0 THEN :cost ELSE purchase_price END,
                     mrp = COALESCE(:mrp, mrp),
                     barcode = COALESCE(:bc, barcode),
@@ -1144,6 +1199,7 @@ def receive_reorder_stock_into_inventory(
                 WHERE id = :id
             """), {
                 "new_stock": new_stock,
+                "received_quantity": recv_qty,
                 "cost": cost_price,
                 "mrp": item.mrp,
                 "bc": barcode_val,
@@ -1267,7 +1323,9 @@ def receive_reorder_stock_into_inventory(
 
 
 @router.post("/upload-wholesaler")
+@limiter.limit("10/minute")
 async def upload_wholesaler_document(
+    request: Request,
     file: UploadFile = File(...),
     user: User = Depends(require_permission("reorder.create")),
     local_db: Session = Depends(get_local_db),
@@ -1350,7 +1408,9 @@ async def upload_wholesaler_document(
 
 
 @router.post("/confirm-wholesaler")
+@limiter.limit("10/minute")
 def confirm_wholesaler_into_stock(
+    request: Request,
     body: WholesalerConfirmRequest,
     user: User = Depends(require_permission("reorder.create")),
     local_db: Session = Depends(get_local_db)
@@ -1441,6 +1501,7 @@ def confirm_wholesaler_into_stock(
                 local_db.execute(text("""
                     UPDATE products
                     SET current_stock = :new_stock,
+                        reorder_level = reorder_level + :received_quantity,
                         purchase_price = CASE WHEN :cost > 0 THEN :cost ELSE purchase_price END,
                         barcode = COALESCE(:bc, barcode),
                         size = COALESCE(:sz, size),
@@ -1449,6 +1510,7 @@ def confirm_wholesaler_into_stock(
                     WHERE id = :id
                 """), {
                     "new_stock": new_stock,
+                    "received_quantity": qty,
                     "cost": cost,
                     "bc": barcode,
                     "sz": item.size,
@@ -1740,7 +1802,9 @@ def get_reorder_and_receiving_history(
 
 
 @router.post("/create-po")
+@limiter.limit("15/minute")
 def create_purchase_order_from_reorder(
+    request: Request,
     body: CreatePOFromReorderInput,
     user: User = Depends(require_permission("orders.create")),
     local_db: Session = Depends(get_local_db)
@@ -1815,7 +1879,9 @@ def create_purchase_order_from_reorder(
 
 
 @router.post("/reorder-previous/{purchase_id}")
+@limiter.limit("15/minute")
 def reorder_from_previous_purchase(
+    request: Request,
     purchase_id: int,
     user: User = Depends(require_permission("orders.create")),
     local_db: Session = Depends(get_local_db)

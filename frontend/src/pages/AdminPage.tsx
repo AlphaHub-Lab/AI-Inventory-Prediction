@@ -1,16 +1,16 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react'
-import { Activity, Database, Download, RefreshCw, ShieldCheck, UserPlus, Users } from 'lucide-react'
+import { Activity, Database, Download, RefreshCw, ShieldCheck, Trash2, UserPlus, Users } from 'lucide-react'
 import { api } from '../lib/api'
 import type { User } from '../types'
+import LoadingState from '../components/LoadingState'
 
 type Overview = { counts: Record<string, number>; active_accounts: number; sales_revenue: number; database_engine: string; database_bytes: number | null }
 type Account = { id: number; email: string; full_name: string; role: User['role']; is_active: boolean; created_at: string; business_id: number | null; business_name: string | null; audit_events: number; inventory_movements: number; chat_conversations: number; purchase_orders: number }
 type ActivityEvent = { id: number; actor: string; actor_email: string; action: string; entity: string; entity_id: string; details: Record<string, unknown>; created_at: string }
 type BusinessRow = { id: number; name: string; business_type: string; master_database_name: string; local_database_name: string | null; owner_email: string; is_active: boolean; created_at: string; accounts: number; products: number; sales: number }
 type AlertRow = { id: string; severity: 'critical' | 'warning' | 'info'; business_id: number; business_name: string; kind: string; count: number }
-type AdminTab = 'overview' | 'businesses' | 'accounts' | 'records' | 'alerts' | 'activity'
+type AdminTab = 'overview' | 'businesses' | 'accounts' | 'alerts' | 'activity'
 type Draft = { role: User['role']; is_active: boolean; business_id: number | null }
-type RecordsPage = { resource: string; total: number; offset: number; limit: number; items: Record<string, unknown>[] }
 
 const resources: [string, string][] = [
   ['businesses', 'Business workspaces'], ['products', 'Products'], ['sales', 'Sales transactions'], ['inventory_movements', 'Inventory movements'], ['batches', 'Inventory batches'],
@@ -18,8 +18,6 @@ const resources: [string, string][] = [
   ['forecasts', 'Forecast records'], ['reorder_recommendations', 'Reorder recommendations'], ['waste_predictions', 'Waste predictions'], ['expiry_alerts', 'Expiry alerts'],
   ['knowledge_documents', 'Knowledge documents'], ['knowledge_chunks', 'Knowledge chunks'], ['chat_conversations', 'Assistant conversations'], ['chat_messages', 'Assistant messages'], ['audit_events', 'Audit events'], ['model_runs', 'Model runs'],
 ]
-const dataResources: [string, string][] = [['accounts', 'Accounts'], ...resources]
-
 function readableDate(value: string) { const date = new Date(value); return Number.isNaN(date.valueOf()) ? value : date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) }
 function formatBytes(bytes: number | null) {
   if (bytes === null) return 'Unavailable'
@@ -36,15 +34,12 @@ export default function AdminPage({ currentUser }: { currentUser: User }) {
   const [businesses, setBusinesses] = useState<BusinessRow[]>([])
   const [events, setEvents] = useState<ActivityEvent[]>([])
   const [alerts, setAlerts] = useState<AlertRow[]>([])
-  const [dataset, setDataset] = useState('products')
-  const [recordsOffset, setRecordsOffset] = useState(0)
-  const [recordsPage, setRecordsPage] = useState<RecordsPage | null>(null)
-  const [recordsLoading, setRecordsLoading] = useState(false)
   const [drafts, setDrafts] = useState<Record<number, Draft>>({})
   const [query, setQuery] = useState('')
   const [showCreate, setShowCreate] = useState(false)
   const [showBusinessForm, setShowBusinessForm] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [pageLoading, setPageLoading] = useState(true)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
@@ -58,16 +53,9 @@ export default function AdminPage({ currentUser }: { currentUser: User }) {
       setOverview(summary); setAccounts(userRows); setEvents(activityRows); setBusinesses(businessRows); setAlerts(alertRows)
       setDrafts(Object.fromEntries(userRows.map(user => [user.id, { role: user.role, is_active: user.is_active, business_id: user.business_id }])))
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not load administrator data.') }
+    finally { setPageLoading(false) }
   }
   useEffect(() => { void load() }, [])
-
-  useEffect(() => {
-    if (tab !== 'records') return
-    setRecordsLoading(true)
-    api<RecordsPage>(`/api/admin/records?resource=${encodeURIComponent(dataset)}&offset=${recordsOffset}&limit=100`)
-      .then(setRecordsPage).catch(e => setError(e instanceof Error ? e.message : 'Could not load records.'))
-      .finally(() => setRecordsLoading(false))
-  }, [tab, dataset, recordsOffset])
 
   const visibleAccounts = useMemo(() => accounts.filter(user => `${user.full_name} ${user.email} ${user.role}`.toLowerCase().includes(query.toLowerCase())), [accounts, query])
 
@@ -121,6 +109,19 @@ export default function AdminPage({ currentUser }: { currentUser: User }) {
     finally { setBusy(false) }
   }
 
+  async function deleteAccount(account: Account) {
+    if (account.id === currentUser.id || busy) return
+    const confirmed = window.confirm(`Permanently delete ${account.full_name} (${account.email})? Their sign-in, sessions, permissions, and assistant conversations will be deleted. Shared business inventory, orders, receipts, and audit history will remain, with this account detached from those records. This cannot be undone.`)
+    if (!confirmed) return
+    setBusy(true); setError(''); setNotice('')
+    try {
+      await api(`/api/admin/accounts/${account.id}`, { method: 'DELETE' })
+      setDrafts(prev => { const next = { ...prev }; delete next[account.id]; return next })
+      setNotice(`Account ${account.email} was permanently deleted.`); await load()
+    } catch (e) { setError(e instanceof Error ? e.message : 'Could not delete account.') }
+    finally { setBusy(false) }
+  }
+
   function exportActivity() {
     const header = ['timestamp', 'actor', 'email', 'action', 'entity', 'entity_id', 'details']
     const rows = events.map(row => [row.created_at, row.actor, row.actor_email, row.action, row.entity, row.entity_id, JSON.stringify(row.details)])
@@ -129,16 +130,9 @@ export default function AdminPage({ currentUser }: { currentUser: User }) {
     const link = document.createElement('a'); link.href = url; link.download = 'stockwise-audit-activity.csv'; link.click(); URL.revokeObjectURL(url)
   }
 
-  function exportRecords() {
-    if (!recordsPage?.items.length) return
-    const columns = Object.keys(recordsPage.items[0])
-    const rows = recordsPage.items.map(record => columns.map(column => record[column] === null || record[column] === undefined ? '' : typeof record[column] === 'object' ? JSON.stringify(record[column]) : String(record[column])))
-    const csv = [columns, ...rows].map(row => row.map(value => `"${String(value).replaceAll('"', '""')}"`).join(',')).join('\r\n')
-    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
-    const link = document.createElement('a'); link.href = url; link.download = `stockwise-${dataset}.csv`; link.click(); URL.revokeObjectURL(url)
-  }
-
   const totalRecords = overview ? Object.entries(overview.counts).filter(([key]) => key !== 'accounts').reduce((sum, [, count]) => sum + count, 0) : 0
+
+  if (pageLoading) return <LoadingState label="Loading administrator workspace…" />
 
   return <div className="admin-page">
     <header className="page-header">
@@ -155,7 +149,7 @@ export default function AdminPage({ currentUser }: { currentUser: User }) {
     </section>}
     <section className="admin-workspace">
       <div className="admin-tabs" role="tablist" aria-label="Administrator sections">
-        {([['overview', 'Overview'], ['businesses', 'Businesses'], ['accounts', 'Accounts & access'], ['records', 'Received data'], ['alerts', `Alerts${alerts.length ? ` · ${alerts.length}` : ''}`], ['activity', 'Audit log']] as [AdminTab, string][]).map(([key, label]) => <button key={key} role="tab" aria-selected={tab === key} className={tab === key ? 'admin-tab active' : 'admin-tab'} onClick={() => setTab(key)}>{label}</button>)}
+        {([['overview', 'Overview'], ['businesses', 'Businesses'], ['accounts', 'Accounts & access'], ['alerts', `Alerts${alerts.length ? ` · ${alerts.length}` : ''}`], ['activity', 'Audit log']] as [AdminTab, string][]).map(([key, label]) => <button key={key} role="tab" aria-selected={tab === key} className={tab === key ? 'admin-tab active' : 'admin-tab'} onClick={() => setTab(key)}>{label}</button>)}
       </div>
       {tab === 'overview' && <div className="admin-section">
         <div className="admin-section-heading"><div><h2>Cross-business overview</h2><p>Central view of resources and activity across all business workspaces.</p></div><span className="admin-live"><i/>Live database</span></div>
@@ -178,20 +172,10 @@ export default function AdminPage({ currentUser }: { currentUser: User }) {
           <label>Full name<input name="full_name" required minLength={2} maxLength={120}/></label><label>Email<input name="email" type="email" required/></label><label>Temporary password<input name="password" type="password" required minLength={12} maxLength={128} autoComplete="new-password"/></label><label>Role<select name="role"><option value="associate">Associate</option><option value="admin">Administrator</option></select></label><label>Business<select name="business_id"><option value="">Not assigned</option>{businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></label><button className="primary-button" disabled={busy}>Create account</button>
         </form>}
         <div className="table-toolbar admin-toolbar"><label className="search"><Users size={15}/><input aria-label="Search accounts" placeholder="Search name, email, role" value={query} onChange={e => setQuery(e.target.value)}/></label><span>{visibleAccounts.length} accounts</span></div>
-        <div className="table-wrap"><table className="admin-table"><thead><tr><th>Account</th><th>Business</th><th>Role</th><th>Activity</th><th>Stock moves</th><th>Assistant</th><th>Orders</th><th>Access</th><th/></tr></thead><tbody>
-          {visibleAccounts.map(account => { const draft = drafts[account.id] || { role: account.role, is_active: account.is_active, business_id: account.business_id }; const isSelf = account.id === currentUser.id; return <tr key={account.id}><td><strong>{account.full_name}</strong><small>{account.email}</small><small>Joined {readableDate(account.created_at)}</small></td><td><select aria-label={`Business for ${account.email}`} value={draft.business_id ?? ''} onChange={e => setDrafts(prev => ({ ...prev, [account.id]: { ...draft, business_id: e.target.value ? Number(e.target.value) : null } }))}><option value="">Central</option>{businesses.map(b => <option value={b.id} key={b.id}>{b.name}</option>)}</select></td><td><select aria-label={`Role for ${account.email}`} value={draft.role} onChange={e => setDrafts(prev => ({ ...prev, [account.id]: { ...draft, role: e.target.value as User['role'] } }))}><option value="associate">Associate</option><option value="business_owner">Business owner</option><option value="admin">Administrator</option></select></td><td>{account.audit_events}</td><td>{account.inventory_movements}</td><td>{account.chat_conversations}</td><td>{account.purchase_orders}</td><td><label className="access-toggle"><input type="checkbox" checked={draft.is_active} disabled={isSelf} onChange={e => setDrafts(prev => ({ ...prev, [account.id]: { ...draft, is_active: e.target.checked } }))}/><span>{draft.is_active ? 'Active' : 'Disabled'}</span></label></td><td><button className="row-action" disabled={busy || isSelf || (draft.role === account.role && draft.is_active === account.is_active && draft.business_id === account.business_id)} onClick={() => saveAccount(account)} title={isSelf ? 'Your own access cannot be changed here' : 'Save access changes'}>Save</button></td></tr> })}
-          {!visibleAccounts.length && <tr><td colSpan={8} className="empty-row">No matching accounts.</td></tr>}
+        <div className="table-wrap"><table className="admin-table"><thead><tr><th>Account</th><th>Business</th><th>Role</th><th>Activity</th><th>Stock moves</th><th>Assistant</th><th>Orders</th><th>Access</th><th>Actions</th></tr></thead><tbody>
+          {visibleAccounts.map(account => { const draft = drafts[account.id] || { role: account.role, is_active: account.is_active, business_id: account.business_id }; const isSelf = account.id === currentUser.id; return <tr key={account.id}><td><strong>{account.full_name}</strong><small>{account.email}</small><small>Joined {readableDate(account.created_at)}</small></td><td><select aria-label={`Business for ${account.email}`} value={draft.business_id ?? ''} onChange={e => setDrafts(prev => ({ ...prev, [account.id]: { ...draft, business_id: e.target.value ? Number(e.target.value) : null } }))}><option value="">Central</option>{businesses.map(b => <option value={b.id} key={b.id}>{b.name}</option>)}</select></td><td><select aria-label={`Role for ${account.email}`} value={draft.role} onChange={e => setDrafts(prev => ({ ...prev, [account.id]: { ...draft, role: e.target.value as User['role'] } }))}><option value="associate">Associate</option><option value="business_owner">Business owner</option><option value="admin">Administrator</option></select></td><td>{account.audit_events}</td><td>{account.inventory_movements}</td><td>{account.chat_conversations}</td><td>{account.purchase_orders}</td><td><label className="access-toggle"><input type="checkbox" checked={draft.is_active} disabled={isSelf} onChange={e => setDrafts(prev => ({ ...prev, [account.id]: { ...draft, is_active: e.target.checked } }))}/><span>{draft.is_active ? 'Active' : 'Disabled'}</span></label></td><td><div className="admin-account-actions"><button className="row-action" disabled={busy || isSelf || (draft.role === account.role && draft.is_active === account.is_active && draft.business_id === account.business_id)} onClick={() => saveAccount(account)} title={isSelf ? 'Your own access cannot be changed here' : 'Save access changes'}>Save</button><button className="row-action delete-account-action" disabled={busy || isSelf} onClick={() => void deleteAccount(account)} title={isSelf ? 'You cannot delete your own account' : `Permanently delete ${account.email}`} aria-label={`Delete account ${account.email}`}><Trash2 size={13}/><span>Delete</span></button></div></td></tr> })}
+          {!visibleAccounts.length && <tr><td colSpan={9} className="empty-row">No matching accounts.</td></tr>}
         </tbody></table></div>
-      </div>}
-      {tab === 'records' && <div className="admin-section">
-        <div className="admin-section-heading"><div><h2>Received data</h2><p>Browse application records. Account password hashes are never exposed.</p></div><div className="admin-record-actions"><button className="secondary-button" onClick={exportRecords} disabled={!recordsPage?.items.length}><Download size={15}/>Export page</button><label className="admin-resource-select"><span>Resource</span><select value={dataset} onChange={e => { setDataset(e.target.value); setRecordsOffset(0) }}>{dataResources.map(([key, label]) => <option value={key} key={key}>{label}</option>)}</select></label></div></div>
-        <div className="admin-record-meta">{recordsPage ? `${recordsPage.total.toLocaleString()} records` : 'Loading records'}{recordsPage?.items.length ? ` · Showing ${recordsPage.offset + 1}–${recordsPage.offset + recordsPage.items.length}` : ''}</div>
-        <div className="table-wrap admin-record-wrap"><table className="admin-table records-table"><thead><tr>{(recordsPage?.items[0] ? Object.keys(recordsPage.items[0]) : []).map(key => <th key={key}>{key.replaceAll('_', ' ')}</th>)}</tr></thead><tbody>
-          {recordsLoading && <tr><td colSpan={recordsPage?.items[0] ? Object.keys(recordsPage.items[0]).length : 1} className="empty-row">Loading records…</td></tr>}
-          {!recordsLoading && recordsPage?.items.map((record, index) => <tr key={String(record.id ?? `${dataset}-${recordsOffset + index}`)}>{Object.entries(record).map(([key, value]) => <td key={key} title={typeof value === 'object' ? JSON.stringify(value) : String(value ?? '')}>{value === null || value === undefined ? '—' : typeof value === 'object' ? JSON.stringify(value) : String(value)}</td>)}</tr>)}
-          {!recordsLoading && !recordsPage?.items.length && <tr><td colSpan={1} className="empty-row">No records in this resource.</td></tr>}
-        </tbody></table></div>
-        <div className="admin-pagination"><button className="secondary-button" disabled={!recordsOffset || recordsLoading} onClick={() => setRecordsOffset(v => Math.max(0, v - 100))}>Previous</button><span>Page {Math.floor(recordsOffset / 100) + 1} of {Math.max(1, Math.ceil((recordsPage?.total || 0) / 100))}</span><button className="secondary-button" disabled={!recordsPage || recordsOffset + recordsPage.items.length >= recordsPage.total || recordsLoading} onClick={() => setRecordsOffset(v => v + 100)}>Next</button></div>
       </div>}
       {tab === 'alerts' && <div className="admin-section">
         <div className="admin-section-heading"><div><h2>Central alerts</h2><p>Current stock, expiry, purchasing, and workspace status signals across all businesses.</p></div><span className={alerts.length ? 'alert-count has-alerts' : 'alert-count'}>{alerts.length ? `${alerts.length} active alerts` : 'All clear'}</span></div>

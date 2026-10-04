@@ -39,8 +39,8 @@ export default function DataInputPage() {
     e.preventDefault(); start(); const formElement = e.currentTarget; const f = new FormData(formElement)
     const minimum = Number(f.get('minimum'))
     try {
-      await api('/api/products', { method: 'POST', body: JSON.stringify({ sku: f.get('sku'), name: f.get('name'), category_id: Number(f.get('category')), supplier_id: Number(f.get('supplier')), price: Number(f.get('price')), current_stock: Number(f.get('stock')), minimum_stock: minimum, maximum_stock: Math.max(200, Number(f.get('stock'))), reorder_point: minimum, safety_stock: minimum, lead_time_days: 3, unit: 'unit', status: 'active' }) })
-      formElement.reset(); await done('Product added to the live catalog.')
+      const created = await api<{ sku: string }>('/api/products', { method: 'POST', body: JSON.stringify({ name: f.get('name'), category_id: Number(f.get('category')), supplier_id: Number(f.get('supplier')), price: Number(f.get('price')), current_stock: Number(f.get('stock')), minimum_stock: minimum, maximum_stock: Math.max(200, Number(f.get('stock'))), reorder_point: minimum, safety_stock: minimum, lead_time_days: 3, unit: 'unit', status: 'active' }) })
+      formElement.reset(); await done(`Product added with SKU ${created.sku}.`)
     } catch (err) { fail(err) }
   }
 
@@ -64,13 +64,16 @@ export default function DataInputPage() {
   async function importRows(e: FormEvent) {
     e.preventDefault(); start()
     const rows = paste.trim().split(/\r?\n/).filter(Boolean).map(line => line.split(',').map(value => value.trim()))
-    const data = rows[0]?.[0]?.toLowerCase() === 'sku' ? rows.slice(1) : rows
+    const hasSkuColumn = rows[0]?.[0]?.toLowerCase() === 'sku' || (rows[0]?.length ?? 0) >= 5
+    const hasHeader = hasSkuColumn || rows[0]?.[0]?.toLowerCase() === 'product name'
+    const data = hasHeader ? rows.slice(1) : rows
     if (!categories.length || !suppliers.length) { setError('Add at least one category and supplier before importing products.'); setBusy(false); return }
     try {
       for (const row of data) {
-        if (row.length < 5) throw new Error('Each CSV row needs SKU, Product Name, Category, Stock, and Selling Price.')
-        const category = categories.find(c => c.name.toLowerCase() === row[2].toLowerCase()) || categories[0]
-        await api('/api/products', { method: 'POST', body: JSON.stringify({ sku: row[0], name: row[1], category_id: category.id, supplier_id: suppliers[0].id, price: Number(row[4]), current_stock: Number(row[3]), minimum_stock: 10, maximum_stock: 200, reorder_point: 10, safety_stock: 10, lead_time_days: 3, unit: 'unit', status: 'active' }) })
+        const offset = hasSkuColumn ? 1 : 0
+        if (row.length < offset + 4) throw new Error('Each CSV row needs Product Name, Category, Stock, and Selling Price. A legacy leading SKU column is also accepted and ignored.')
+        const category = categories.find(c => c.name.toLowerCase() === row[offset + 1].toLowerCase()) || categories[0]
+        await api('/api/products', { method: 'POST', body: JSON.stringify({ name: row[offset], category_id: category.id, supplier_id: suppliers[0].id, price: Number(row[offset + 3]), current_stock: Number(row[offset + 2]), minimum_stock: 10, maximum_stock: 200, reorder_point: 10, safety_stock: 10, lead_time_days: 3, unit: 'unit', status: 'active' }) })
       }
       setPaste(''); await done(`${data.length} product${data.length === 1 ? '' : 's'} imported.`)
     } catch (err) { fail(err) }
@@ -101,7 +104,6 @@ export default function DataInputPage() {
   return <div className="data-studio">
     <header className="page-header">
       <div><p className="eyebrow">CATALOG OPERATIONS</p><h1>Data Input &amp; Management</h1><p>Add products, record sales, and keep every stock movement traceable.</p></div>
-      <button className="primary-button" onClick={() => setTab('product')}><Plus size={16}/>Add product</button>
     </header>
     {notice && <div className="studio-notice" role="status">{notice}<button className="text-action" onClick={() => setNotice('')}>Dismiss</button></div>}
     {error && <div className="error-state" role="alert">{error}</div>}
@@ -111,7 +113,7 @@ export default function DataInputPage() {
         {tab === 'product' && <form onSubmit={createProduct}>
           <div className="form-title"><div><h2>Add a product</h2><p>New catalog records are available immediately across Stockwise.</p></div></div>
           <div className="form-grid studio-fields">
-            <label>Product name<input name="name" placeholder="e.g. Basmati Rice" required minLength={2}/></label><label>SKU<input name="sku" placeholder="STK-031" required minLength={2}/></label>
+            <label>Product name<input name="name" placeholder="e.g. Basmati Rice" required minLength={2}/></label><label>SKU<input value="Generated automatically on save" readOnly aria-label="SKU generated automatically"/></label>
             <label>Category<select name="category" required>{categories.map(c => <option value={c.id} key={c.id}>{c.name}</option>)}</select></label><label>Supplier<select name="supplier" required>{suppliers.map(s => <option value={s.id} key={s.id}>{s.name}</option>)}</select></label>
             <label>Unit cost price (₹)<input name="cost" type="number" min="0" step="0.01" placeholder="0.00"/></label><label>Selling price (₹)<input name="price" type="number" min="0.01" step="0.01" required placeholder="0.00"/></label>
             <label>Initial stock quantity<input name="stock" type="number" min="0" required defaultValue="0"/></label><label>Minimum reorder threshold<input name="minimum" type="number" min="0" required defaultValue="10"/></label>
@@ -133,15 +135,15 @@ export default function DataInputPage() {
         </form>}
         {tab === 'bulk' && <form onSubmit={importRows}>
           <div className="form-title"><div><h2>Bulk CSV / fast paste</h2><p>Paste one product per line. Existing category names are matched automatically.</p></div></div>
-          <label className="bulk-label">CSV data<textarea value={paste} onChange={e => setPaste(e.target.value)} rows={7} placeholder={'SKU,Product Name,Category,Stock,Selling Price\nSTK-031,Basmati Rice,Grains,42,185.00'} required/></label>
-          <div className="form-footer"><span>Column order: SKU, Product Name, Category, Stock, Selling Price.</span><button className="primary-button" disabled={busy}><ArrowDownToLine size={16}/>{busy ? 'Importing…' : 'Import products'}</button></div>
+          <label className="bulk-label">CSV data<textarea value={paste} onChange={e => setPaste(e.target.value)} rows={7} placeholder={'Product Name,Category,Stock,Selling Price\nBasmati Rice,Grains,42,185.00'} required/></label>
+          <div className="form-footer"><span>Column order: Product Name, Category, Stock, Selling Price. Legacy CSVs with a leading SKU column are accepted; SKUs are generated automatically.</span><button className="primary-button" disabled={busy}><ArrowDownToLine size={16}/>{busy ? 'Importing…' : 'Import products'}</button></div>
         </form>}
       </div>
     </section>
     <section className="panel table-panel studio-table-panel">
       <div className="table-toolbar"><div><strong>Current inventory</strong><small>{shown.length} products · live catalog</small></div><label className="search"><Search size={16}/><input aria-label="Search inventory" placeholder="Search SKU, product, category" value={query} onChange={e => setQuery(e.target.value)}/></label></div>
       <div className="table-wrap"><table><thead><tr><th>SKU</th><th>Product name</th><th>Category</th><th>Stock level</th><th>Status</th><th>Unit price</th><th>Actions</th></tr></thead><tbody>
-        {shown.map(p => { const low = p.current_stock <= p.reorder_point; return <tr key={p.id}><td className="sku-cell">{p.sku}</td><td><strong>{p.name}</strong></td><td>{p.category_name || '—'}</td><td>{p.current_stock} {p.unit}</td><td><span className={low ? 'stock-status low' : 'stock-status'}><i/>{low ? 'Low stock' : 'In stock'}</span></td><td>₹{p.price.toLocaleString('en-IN')}</td><td><div className="row-actions"><button className="row-action" title="Edit product name and selling price" aria-label={`Edit ${p.name}`} onClick={() => editPrice(p)}>Edit</button><button className="row-action restock-action" title="Quick +10 restock" onClick={() => quickRestock(p)} disabled={busy}><Plus size={13}/>+10</button><button className="row-action delete-action" title="Archive product" aria-label={`Delete ${p.name}`} onClick={() => archive(p)}><Trash2 size={14}/></button></div></td></tr> })}
+        {shown.map(p => { const low = !p.is_weight_based && p.reorder_point > 0 && p.current_stock * 5 < p.reorder_point; return <tr key={p.id}><td className="sku-cell">{p.sku}</td><td><strong>{p.name}</strong></td><td>{p.category_name || '—'}</td><td>{p.current_stock}/{p.reorder_point} {p.unit}</td><td><span className={low ? 'stock-status low' : 'stock-status'}><i/>{low ? 'Low stock' : 'In stock'}</span></td><td>₹{p.price.toLocaleString('en-IN')}</td><td><div className="row-actions"><button className="row-action" title="Edit product name and selling price" aria-label={`Edit ${p.name}`} onClick={() => editPrice(p)}>Edit</button><button className="row-action restock-action" title="Quick +10 restock" onClick={() => quickRestock(p)} disabled={busy}><Plus size={13}/>+10</button><button className="row-action delete-action" title="Archive product" aria-label={`Delete ${p.name}`} onClick={() => archive(p)}><Trash2 size={14}/></button></div></td></tr> })}
         {!shown.length && <tr><td colSpan={7} className="empty-row">No matching products.</td></tr>}
       </tbody></table></div>
     </section>

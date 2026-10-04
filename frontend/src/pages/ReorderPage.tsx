@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react'
+import { type FormEvent, useEffect, useState, useRef } from 'react'
 import {
   AlertCircle,
   AlertTriangle,
@@ -32,6 +32,7 @@ import {
   X
 } from 'lucide-react'
 import { api } from '../lib/api'
+import LoadingState from '../components/LoadingState'
 import type {
   PendingReorderItem,
   ReceivingHistoryItem,
@@ -115,6 +116,7 @@ export default function ReorderPage({ currentUser }: { currentUser: User }) {
 
   // Modal 1: Manual Add to Reorder
   const [showAddModal, setShowAddModal] = useState(false)
+  const [manualEntryMode, setManualEntryMode] = useState<'catalog' | 'new'>('catalog')
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<CatalogSearchItem[]>([])
   const [searchingCatalog, setSearchingCatalog] = useState(false)
@@ -329,6 +331,41 @@ export default function ReorderPage({ currentUser }: { currentUser: User }) {
       setActiveTab('pending')
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to add product')
+    }
+  }
+
+  async function handleAddUnlistedProduct(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const form = new FormData(event.currentTarget)
+    const productName = String(form.get('product_name') || '').trim()
+    const quantity = Number(form.get('quantity'))
+    try {
+      const response = await api<{ message?: string }>('/api/reorders/item', {
+        method: 'POST',
+        body: JSON.stringify({
+          product_name: productName,
+          product_unit: String(form.get('unit') || capability.default_unit),
+          product_category: String(form.get('category') || '').trim() || null,
+          product_size: String(form.get('size') || '').trim() || null,
+          product_color: String(form.get('color') || '').trim() || null,
+          product_style: String(form.get('style') || '').trim() || null,
+          supplier_name: String(form.get('supplier_name') || '').trim() || null,
+          purchase_price: Number(form.get('purchase_price') || 0),
+          suggested_quantity: quantity,
+          selected_quantity: quantity,
+          source: 'manual',
+          reason: String(form.get('reason') || 'Manual replenishment order').trim(),
+          notes: 'Item added directly from the reorder page',
+        }),
+      })
+      setSuccessNotice(response.message || `Added “${productName}” to the reorder basket.`)
+      setTimeout(() => setSuccessNotice(null), 5000)
+      setShowAddModal(false)
+      setSearchQuery('')
+      await loadOverview()
+      setActiveTab('pending')
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Could not add this product to the reorder basket.')
     }
   }
 
@@ -584,7 +621,7 @@ export default function ReorderPage({ currentUser }: { currentUser: User }) {
   }
 
   if (loading && !data) {
-    return <div className="p-8 text-center text-slate-400">Loading live business reorder metrics…</div>
+    return <LoadingState label="Loading reorder data…" />
   }
 
   const pendingTotal = data?.pending_reorders.reduce((sum, item) => sum + (item.estimated_cost || 0), 0) || 0
@@ -621,7 +658,7 @@ export default function ReorderPage({ currentUser }: { currentUser: User }) {
   })
 
   return (
-    <div className="reorder-page space-y-6 p-4 md:p-6 max-w-7xl mx-auto">
+    <div className="reorder-page theme-workspace space-y-6 p-4 md:p-6 max-w-7xl mx-auto">
       {/* Header */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-700/60 pb-5">
         <div>
@@ -712,6 +749,76 @@ export default function ReorderPage({ currentUser }: { currentUser: User }) {
           <AlertTriangle size={18} />
           <span>{error}</span>
         </div>
+      )}
+
+      {/* Inline manual reorder controls: use an inventory item or add a new item directly. */}
+      {showAddModal && (
+        <section className="panel p-5 md:p-6 space-y-4" aria-labelledby="manual-reorder-heading">
+          <div className="flex items-center justify-between gap-3 border-b border-slate-200 pb-3">
+            <div>
+              <p className="eyebrow">MANUAL REPLENISHMENT</p>
+              <h2 id="manual-reorder-heading" className="text-lg font-bold">Add to Reorder Basket</h2>
+              <p className="text-sm subtle-text mt-1">Choose a catalog item or enter something new to order.</p>
+            </div>
+            <button type="button" onClick={() => setShowAddModal(false)} className="secondary-button">Close</button>
+          </div>
+
+          <div className="flex flex-wrap gap-2" role="tablist" aria-label="Choose reorder item source">
+            <button type="button" role="tab" aria-selected={manualEntryMode === 'catalog'} onClick={() => { setManualEntryMode('catalog'); setDuplicatePrompt(null) }} className={manualEntryMode === 'catalog' ? 'primary-button' : 'secondary-button'}>From inventory</button>
+            <button type="button" role="tab" aria-selected={manualEntryMode === 'new'} onClick={() => { setManualEntryMode('new'); setSelectedCatalogProduct(null); setDuplicatePrompt(null) }} className={manualEntryMode === 'new' ? 'primary-button' : 'secondary-button'}>New product</button>
+          </div>
+
+          {duplicatePrompt && manualEntryMode === 'catalog' && (
+            <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 space-y-3">
+              <div className="flex items-start gap-2"><AlertCircle size={18} className="shrink-0 mt-0.5"/><div><strong>Already in the active reorder list</strong><p className="text-sm mt-1">{duplicatePrompt.product_name} is pending with quantity {duplicatePrompt.current_requested_quantity}.</p></div></div>
+              <div className="flex flex-wrap gap-2 pt-2 border-t border-amber-200">
+                <button type="button" onClick={() => handleManualAddSubmit('increase')} className="primary-button">Increase by {duplicatePrompt.new_quantity}</button>
+                <button type="button" onClick={() => handleManualAddSubmit('replace')} className="secondary-button">Set to {duplicatePrompt.new_quantity}</button>
+                <button type="button" onClick={() => setDuplicatePrompt(null)} className="secondary-button">Cancel</button>
+              </div>
+            </div>
+          )}
+
+          {manualEntryMode === 'catalog' && !duplicatePrompt && (
+            <div className="space-y-4">
+              <label className="text-sm font-medium">Search inventory (name, SKU, barcode, or variant)
+                <div className="relative mt-1.5"><Search size={16} className="absolute left-3 top-3 text-slate-400"/><input type="search" placeholder={`e.g. ${isClothing ? 'T-Shirt, Black M…' : 'Flour, Paracetamol, Pen…'}`} value={searchQuery} onChange={event => searchCatalog(event.target.value)} className="w-full pl-9 pr-4 py-2 rounded-xl border border-slate-300 bg-white text-sm"/></div>
+              </label>
+              {searchingCatalog && <div className="text-sm subtle-text py-2">Searching inventory…</div>}
+              {searchResults.length > 0 && !selectedCatalogProduct && (
+                <div className="max-h-56 overflow-y-auto rounded-xl border border-slate-200 divide-y divide-slate-100">
+                  {searchResults.map(item => <button type="button" key={item.product_id} onClick={() => { setSelectedCatalogProduct(item); const target = item.target_stock && item.target_stock > 0 ? item.target_stock : item.reorder_level * 2; setManualAddQty(Math.max(target - item.current_stock, allowDecimals ? 1 : 1)) }} className="w-full p-3 text-left hover:bg-slate-50 flex items-center justify-between gap-3">
+                    <span><strong className="block">{item.product_name}{isClothing && (item.color || item.size) ? ` · ${item.color || ''} ${item.size || ''}` : ''}</strong><small className="subtle-text">{item.sku}{item.barcode ? ` · ${item.barcode}` : ''}</small></span>
+                    <span className="text-right text-sm">Stock {item.current_stock} {item.unit}<small className="block subtle-text">Cost ₹{item.purchase_price}</small></span>
+                  </button>)}
+                </div>
+              )}
+              {selectedCatalogProduct && <div className="grid gap-3 md:grid-cols-2 items-end rounded-xl border border-slate-200 p-4">
+                <div className="md:col-span-2"><strong>{selectedCatalogProduct.product_name}</strong><p className="text-sm subtle-text">Current stock {selectedCatalogProduct.current_stock}/{selectedCatalogProduct.reorder_level} {selectedCatalogProduct.unit || 'units'}</p></div>
+                <label>Requested quantity<input type="number" step={allowDecimals ? '0.1' : '1'} min={allowDecimals ? '0.1' : '1'} value={manualAddQty} onChange={event => setManualAddQty(Math.max(allowDecimals ? 0.1 : 1, Number(event.target.value)))}/></label>
+                <label>Reason / notes<input value={manualAddReason} onChange={event => setManualAddReason(event.target.value)} placeholder="e.g. Expected demand"/></label>
+                <div className="md:col-span-2 flex justify-end gap-2"><button type="button" className="secondary-button" onClick={() => setSelectedCatalogProduct(null)}>Change item</button><button type="button" className="primary-button" onClick={() => handleManualAddSubmit('prompt')}>Add to Reorder Basket</button></div>
+              </div>}
+            </div>
+          )}
+
+          {manualEntryMode === 'new' && (
+            <form onSubmit={handleAddUnlistedProduct} className="space-y-4">
+              <p className="text-sm subtle-text">This creates a zero-stock local catalog entry and adds the requested quantity to the reorder basket. Stock is added when delivery is received.</p>
+              <div className="form-grid">
+                <label>Product name<input name="product_name" minLength={2} maxLength={255} required placeholder="Enter any item to order"/></label>
+                <label>Category<input name="category" maxLength={150} placeholder="Optional category"/></label>
+                <label>Unit<select name="unit" defaultValue={capability.default_unit}>{capability.units.map(unit => <option value={unit} key={unit}>{unit}</option>)}</select></label>
+                <label>Supplier name<input name="supplier_name" maxLength={255} placeholder="Optional supplier"/></label>
+                {isClothing && <><label>Size<input name="size" maxLength={50} placeholder="Optional size"/></label><label>Color<input name="color" maxLength={50} placeholder="Optional color"/></label><label>Style<input name="style" maxLength={100} placeholder="Optional style"/></label></>}
+                <label>Purchase price (₹)<input name="purchase_price" type="number" min="0" step="0.01" defaultValue="0"/></label>
+                <label>Requested quantity<input name="quantity" type="number" step={allowDecimals ? '0.1' : '1'} min={allowDecimals ? '0.1' : '1'} required defaultValue={allowDecimals ? '10' : '10'}/></label>
+                <label className="field-wide">Reason / notes<input name="reason" maxLength={500} defaultValue="Manual replenishment order"/></label>
+              </div>
+              <div className="flex justify-end"><button type="submit" className="primary-button">Create item and add to basket</button></div>
+            </form>
+          )}
+        </section>
       )}
 
       {/* KPI Stats Overview Cards (Section 9) */}
@@ -1034,7 +1141,7 @@ export default function ReorderPage({ currentUser }: { currentUser: User }) {
                         </td>
                         <td className="py-3 px-4 font-mono font-medium">
                           <span className={`px-2 py-0.5 rounded text-xs ${
-                            item.current_stock <= item.reorder_level
+                            item.reorder_level > 0 && item.current_stock * 5 < item.reorder_level
                               ? 'bg-rose-500/10 text-rose-400 font-semibold'
                               : 'text-slate-300'
                           }`}>
@@ -1226,7 +1333,7 @@ export default function ReorderPage({ currentUser }: { currentUser: User }) {
                       </td>
                       <td className="py-3 px-4">
                         <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-rose-500/10 text-rose-400 border border-rose-500/20">
-                          {item.current_stock}
+                          {item.current_stock}/{item.reorder_level}
                         </span>
                       </td>
                       <td className="py-3 px-4 font-mono text-slate-300">{item.reorder_level}</td>
@@ -1674,194 +1781,6 @@ export default function ReorderPage({ currentUser }: { currentUser: User }) {
               </table>
             </div>
           )}
-        </div>
-      )}
-
-      {/* MODAL 1: ADD PRODUCT MANUALLY (WITH DUPLICATE PROTECTION - SECTION 51) */}
-      {showAddModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-lg p-6 space-y-4 shadow-2xl animate-fadeIn">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <h3 className="text-lg font-bold text-white flex items-center gap-2">
-                <Plus size={18} className="text-indigo-400" />
-                <span>Add Product to Reorder Basket</span>
-              </h3>
-              <button
-                onClick={() => {
-                  setShowAddModal(false)
-                  setSelectedCatalogProduct(null)
-                  setDuplicatePrompt(null)
-                  setSearchQuery('')
-                  setSearchResults([])
-                }}
-                className="text-slate-400 hover:text-white"
-              >
-                <X size={20} />
-              </button>
-            </div>
-
-            {/* DUPLICATE PROMPT INTERACTIVE BANNER */}
-            {duplicatePrompt && (
-              <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 space-y-3">
-                <div className="flex items-start gap-2">
-                  <AlertCircle size={18} className="text-amber-400 shrink-0 mt-0.5" />
-                  <div>
-                    <div className="font-bold text-white text-sm">Already in active reorder list!</div>
-                    <p className="text-xs text-amber-200/80 mt-1">
-                      "{duplicatePrompt.product_name}" is already pending with requested quantity: <strong>{duplicatePrompt.current_requested_quantity}</strong>.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 pt-2 border-t border-amber-500/20 text-xs">
-                  <button
-                    onClick={() => handleManualAddSubmit('increase')}
-                    className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-semibold transition"
-                  >
-                    Increase Quantity (+{duplicatePrompt.new_quantity})
-                  </button>
-                  <button
-                    onClick={() => handleManualAddSubmit('replace')}
-                    className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 transition"
-                  >
-                    Set to {duplicatePrompt.new_quantity}
-                  </button>
-                  <button
-                    onClick={() => setDuplicatePrompt(null)}
-                    className="px-3 py-1.5 text-slate-400 hover:text-white transition"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {!duplicatePrompt && (
-              <>
-                {/* Catalog Search Input */}
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-slate-300">Search Store Catalog (Name, SKU, Barcode, Variant)</label>
-                  <div className="relative">
-                    <Search size={16} className="absolute left-3 top-3 text-slate-400" />
-                    <input
-                      type="text"
-                      placeholder={`e.g. ${isClothing ? 'T-Shirt, Black M...' : 'Flour, Paracetamol, Pen...'}`}
-                      value={searchQuery}
-                      onChange={(e) => searchCatalog(e.target.value)}
-                      className="w-full pl-9 pr-4 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white placeholder-slate-500 text-sm focus:border-indigo-500 focus:outline-none"
-                    />
-                  </div>
-                </div>
-
-                {searchingCatalog && (
-                  <div className="text-xs text-slate-400 text-center py-2">Searching store catalog…</div>
-                )}
-
-                {searchResults.length > 0 && !selectedCatalogProduct && (
-                  <div className="max-h-48 overflow-y-auto rounded-xl border border-slate-700/60 divide-y divide-slate-800 bg-slate-850">
-                    {searchResults.map((item) => (
-                      <div
-                        key={item.product_id}
-                        onClick={() => {
-                          setSelectedCatalogProduct(item)
-                          const target = item.target_stock && item.target_stock > 0 ? item.target_stock : item.reorder_level * 2
-                          setManualAddQty(Math.max(target - item.current_stock, allowDecimals ? 1.0 : 1))
-                        }}
-                        className="p-3 hover:bg-indigo-600/10 cursor-pointer flex items-center justify-between transition"
-                      >
-                        <div>
-                          <div className="text-sm font-semibold text-white flex items-center gap-2">
-                            <span>{item.product_name}</span>
-                            {isClothing && (item.size || item.color) && (
-                              <span className="px-1.5 py-0.2 rounded bg-purple-500/10 text-purple-300 text-[10px]">
-                                {item.color} {item.size}
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-xs text-slate-400 font-mono flex items-center gap-2 mt-0.5">
-                            <span>SKU: {item.sku}</span>
-                            {item.barcode && <span className="text-indigo-400">BAR: {item.barcode}</span>}
-                          </div>
-                        </div>
-                        <div className="text-right text-xs">
-                          <div className="text-slate-300">Stock: <strong className="text-white">{item.current_stock}</strong> {item.unit || ''}</div>
-                          <div className="text-emerald-400 font-mono">₹{item.purchase_price}</div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {selectedCatalogProduct && (
-                  <div className="p-3.5 rounded-xl bg-indigo-950/40 border border-indigo-500/30 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <div className="font-bold text-white text-sm">{selectedCatalogProduct.product_name}</div>
-                        <div className="text-xs text-slate-400 font-mono">
-                          Current Stock: {selectedCatalogProduct.current_stock} {selectedCatalogProduct.unit || 'units'} | Reorder Level: {selectedCatalogProduct.reorder_level}
-                        </div>
-                      </div>
-                      <button
-                        onClick={() => setSelectedCatalogProduct(null)}
-                        className="text-xs text-indigo-400 hover:underline"
-                      >
-                        Change Product
-                      </button>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3 pt-2 border-t border-indigo-500/20">
-                      <div>
-                        <label className="text-xs text-slate-300 block mb-1">
-                          Requested Quantity ({selectedCatalogProduct.unit || capability.default_unit})
-                        </label>
-                        <input
-                          type="number"
-                          step={allowDecimals ? "0.1" : "1"}
-                          min={allowDecimals ? "0.1" : "1"}
-                          value={manualAddQty}
-                          onChange={(e) => setManualAddQty(Math.max(allowDecimals ? 0.1 : 1, Number(e.target.value)))}
-                          className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-indigo-500/50 text-white font-mono text-sm"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs text-slate-300 block mb-1">Reason / Notes</label>
-                        <input
-                          type="text"
-                          value={manualAddReason}
-                          onChange={(e) => setManualAddReason(e.target.value)}
-                          className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-white text-xs"
-                          placeholder="e.g. Expected weekend demand"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                <div className="pt-3 border-t border-slate-800 flex justify-end gap-2">
-                  <button
-                    onClick={() => {
-                      setShowAddModal(false)
-                      setSelectedCatalogProduct(null)
-                    }}
-                    className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium transition"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={() => handleManualAddSubmit('prompt')}
-                    disabled={!selectedCatalogProduct}
-                    className={`px-4 py-2 rounded-xl font-semibold text-sm transition ${
-                      selectedCatalogProduct
-                        ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/20'
-                        : 'bg-slate-800 text-slate-600 cursor-not-allowed'
-                    }`}
-                  >
-                    Add to Reorder Basket
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
         </div>
       )}
 

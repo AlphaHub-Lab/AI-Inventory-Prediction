@@ -8,7 +8,9 @@ Handles:
 """
 
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -17,6 +19,10 @@ from ..database_manager import get_admin_session, get_master_session, provision_
 from ..dependencies import get_admin_db, get_current_user, require_roles
 from ..models import AuditLog, Business, User
 from ..security import hash_password
+from ..rate_limit import limiter
+
+_CATALOG_SUMMARY_CACHE = {"timestamp": 0.0, "data": []}
+_CACHE_TTL_SECONDS = 60.0
 
 router = APIRouter(prefix="/api/admin-system", tags=["System Administrator"])
 
@@ -32,7 +38,9 @@ class BusinessCreateExtended(BaseModel):
 
 
 @router.post("/businesses", status_code=201)
+@limiter.limit("5/minute")
 def create_business_with_dedicated_database(
+    request: Request,
     body: BusinessCreateExtended,
     user: User = Depends(require_roles("admin")),
     admin_db: Session = Depends(get_admin_db)
@@ -154,41 +162,70 @@ def get_database_registry(
     } for r in rows]
 
 
+def _inspect_single_catalog(c: str) -> dict:
+    db_name = f"master_{c}"
+    m_session = None
+    try:
+        m_session = get_master_session(c)
+        prod_count = m_session.execute(text("SELECT COUNT(*) FROM catalog.products")).fetchone()[0]
+        sup_count = m_session.execute(text("SELECT COUNT(*) FROM catalog.suppliers")).fetchone()[0]
+        samples = m_session.execute(text("SELECT id, sku, product_name, category FROM catalog.products LIMIT 5")).fetchall()
+        return {
+            "business_type": c,
+            "database_name": db_name,
+            "status": "online",
+            "product_count": prod_count,
+            "supplier_count": sup_count,
+            "sample_products": [{"id": str(s[0]), "sku": s[1], "name": s[2], "category": s[3]} for s in samples]
+        }
+    except Exception as e:
+        return {
+            "business_type": c,
+            "database_name": db_name,
+            "status": "error",
+            "error": str(e)
+        }
+    finally:
+        if m_session:
+            try:
+                m_session.close()
+            except Exception:
+                pass
+
+
 @router.get("/master-catalogs-summary")
+@limiter.limit("30/minute")
 def get_master_catalogs_summary(
+    request: Request,
     user: User = Depends(require_roles("admin"))
 ):
-    """Inspect product catalog sizes and status across all 5 master databases."""
+    """Inspect product catalog sizes and status across all 5 master databases concurrently with caching."""
+    now = time.time()
+    if _CATALOG_SUMMARY_CACHE["data"] and (now - _CATALOG_SUMMARY_CACHE["timestamp"]) < _CACHE_TTL_SECONDS:
+        return _CATALOG_SUMMARY_CACHE["data"]
+
     catalogs = ["medical", "grocery", "restaurant", "stationery", "dairy"]
-    summary = []
+    results = {}
 
-    for c in catalogs:
-        db_name = f"master_{c}"
-        try:
-            m_session = get_master_session(c)
-            prod_count = m_session.execute(text("SELECT COUNT(*) FROM catalog.products")).fetchone()[0]
-            sup_count = m_session.execute(text("SELECT COUNT(*) FROM catalog.suppliers")).fetchone()[0]
-            # Sample 5 products
-            samples = m_session.execute(text("SELECT id, sku, product_name, category FROM catalog.products LIMIT 5")).fetchall()
-            m_session.close()
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_cat = {executor.submit(_inspect_single_catalog, c): c for c in catalogs}
+        for future in as_completed(future_to_cat):
+            cat = future_to_cat[future]
+            try:
+                results[cat] = future.result(timeout=8.0)
+            except Exception as e:
+                results[cat] = {
+                    "business_type": cat,
+                    "database_name": f"master_{cat}",
+                    "status": "error",
+                    "error": str(e)
+                }
 
-            summary.append({
-                "business_type": c,
-                "database_name": db_name,
-                "status": "online",
-                "product_count": prod_count,
-                "supplier_count": sup_count,
-                "sample_products": [{"id": str(s[0]), "sku": s[1], "name": s[2], "category": s[3]} for s in samples]
-            })
-        except Exception as e:
-            summary.append({
-                "business_type": c,
-                "database_name": db_name,
-                "status": "error",
-                "error": str(e)
-            })
+    ordered_summary = [results[c] for c in catalogs if c in results]
+    _CATALOG_SUMMARY_CACHE["timestamp"] = now
+    _CATALOG_SUMMARY_CACHE["data"] = ordered_summary
+    return ordered_summary
 
-    return summary
 
 
 @router.get("/audit-logs")

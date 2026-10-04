@@ -37,12 +37,42 @@ def check_frontend_health():
     except Exception:
         return False
 
+def check_db_connection():
+    try:
+        env_file = ROOT / ".env"
+        db_url = None
+        if env_file.exists():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line.startswith("DATABASE_URL="):
+                    db_url = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+        if not db_url:
+            return False
+
+        cmd = [
+            PYTHON_EXE, "-c",
+            "import sys; from sqlalchemy import create_engine, text; "
+            "engine = create_engine(sys.argv[1]); "
+            "conn = engine.connect(); conn.execute(text('SELECT 1')); conn.close(); print('OK')",
+            db_url
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+        return "OK" in res.stdout
+    except Exception:
+        return False
+
 def ensure_postgres():
-    print("[*] Starting PostgreSQL with Docker Compose...")
+    print("[*] Checking database connectivity...")
+    if check_db_connection():
+        print("    [OK] Connected to configured PostgreSQL database.")
+        return
+
+    print("[*] Database not directly reachable. Attempting to start with Docker Compose...")
     try:
         subprocess.run(["docker", "compose", "up", "-d", "--wait", "db"], cwd=str(ROOT), check=True)
     except (FileNotFoundError, subprocess.CalledProcessError) as exc:
-        raise RuntimeError("PostgreSQL could not be started. Install and start Docker Desktop, then retry.") from exc
+        raise RuntimeError("PostgreSQL could not be reached and Docker is unavailable. Please check your DATABASE_URL in .env or start Docker Desktop.") from exc
 
 def main():
     print("=" * 60)

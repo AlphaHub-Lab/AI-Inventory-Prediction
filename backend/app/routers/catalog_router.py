@@ -8,13 +8,14 @@ Enables:
 
 import uuid
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..dependencies import get_current_user, get_local_db, get_master_db, require_permission
 from ..models import User
+from ..rate_limit import limiter
 
 router = APIRouter(prefix="/api/catalog", tags=["Master Catalog"])
 
@@ -124,7 +125,9 @@ def search_catalog_products(
 
 
 @router.post("/import", status_code=201)
+@limiter.limit("15/minute")
 def import_master_product(
+    request: Request,
     body: ImportProductInput,
     user: User = Depends(require_permission("inventory.create")),
     local_db: Session = Depends(get_local_db),

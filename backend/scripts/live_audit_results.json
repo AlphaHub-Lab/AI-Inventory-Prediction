@@ -1,0 +1,227 @@
+{
+  "frontend": {
+    "status": 200,
+    "latency_ms": 2050.1
+  },
+  "health": {
+    "status": 200,
+    "latency_ms": 2.63,
+    "data": {
+      "status": "ok",
+      "service": "Inventory Intelligence API",
+      "environment": "development",
+      "database": "Supabase PostgreSQL Multi-Tenant",
+      "roles": [
+        "admin",
+        "business_owner",
+        "associate"
+      ],
+      "business_types": [
+        "grocery",
+        "medical",
+        "stationery",
+        "restaurant",
+        "food",
+        "dairy",
+        "clothing",
+        "others"
+      ]
+    }
+  },
+  "login_admin": {
+    "status": 200,
+    "latency_ms": 5817.47
+  },
+  "login_owner": {
+    "status": 200,
+    "latency_ms": 15148.22
+  },
+  "login_associate": {
+    "status": 200,
+    "latency_ms": 6208.89
+  },
+  "me_admin": {
+    "status": 200,
+    "latency_ms": 7454.06,
+    "data": {
+      "id": 1,
+      "email": "admin@inventory.example.com",
+      "full_name": "System Administrator",
+      "role": "admin",
+      "is_active": true,
+      "business_id": null,
+      "business_name": null,
+      "business_type": null
+    }
+  },
+  "me_owner": {
+    "status": 200,
+    "latency_ms": 2750.34,
+    "data": {
+      "id": 2,
+      "email": "Amogh@gmail.com",
+      "full_name": "Amogh",
+      "role": "business_owner",
+      "is_active": true,
+      "business_id": 1,
+      "business_name": "Skull",
+      "business_type": "medical"
+    }
+  },
+  "me_associate": {
+    "status": 200,
+    "latency_ms": 2754.91,
+    "data": {
+      "id": 3,
+      "email": "sarah@skullmedicals.com",
+      "full_name": "Sarah Staff",
+      "role": "associate",
+      "is_active": true,
+      "business_id": 1,
+      "business_name": "Skull",
+      "business_type": "medical"
+    }
+  },
+  "Products List": {
+    "method": "GET",
+    "path": "/api/products?page=1&page_size=10",
+    "status": 200,
+    "latency_ms": 4791.7
+  },
+  "Categories List": {
+    "method": "GET",
+    "path": "/api/categories",
+    "status": 200,
+    "latency_ms": 4313.73
+  },
+  "Suppliers List": {
+    "method": "GET",
+    "path": "/api/suppliers",
+    "status": 200,
+    "latency_ms": 4712.56
+  },
+  "Inventory Batches": {
+    "method": "GET",
+    "path": "/api/inventory/batches",
+    "status": 200,
+    "latency_ms": 4318.68
+  },
+  "Inventory Transactions": {
+    "method": "GET",
+    "path": "/api/inventory/transactions",
+    "status": 200,
+    "latency_ms": 4329.75
+  },
+  "Sales History": {
+    "method": "GET",
+    "path": "/api/sales",
+    "status": 200,
+    "latency_ms": 4708.68
+  },
+  "Analytics Dashboard": {
+    "method": "GET",
+    "path": "/api/dashboard",
+    "status": 200,
+    "latency_ms": 7101.06
+  },
+  "Supplier Analytics": {
+    "method": "GET",
+    "path": "/api/analytics/suppliers",
+    "status": 200,
+    "latency_ms": 5101.53
+  },
+  "Expiry Alerts": {
+    "method": "GET",
+    "path": "/api/expiry",
+    "status": 200,
+    "latency_ms": 4305.71
+  },
+  "Waste Predictions": {
+    "method": "GET",
+    "path": "/api/waste",
+    "status": 200,
+    "latency_ms": 4322.67
+  },
+  "Forecasts": {
+    "method": "GET",
+    "path": "/api/forecasts?horizon_days=7",
+    "status": 404,
+    "latency_ms": 4311.97
+  },
+  "Reorder List": {
+    "method": "GET",
+    "path": "/api/reorders",
+    "status": 200,
+    "latency_ms": 4309.26
+  },
+  "Reorders Overview": {
+    "method": "GET",
+    "path": "/api/reorders/overview",
+    "status": 200,
+    "latency_ms": 23819.74
+  },
+  "Purchase Orders": {
+    "method": "GET",
+    "path": "/api/purchase-orders",
+    "status": 200,
+    "latency_ms": 4316.55
+  },
+  "Receipts List": {
+    "method": "GET",
+    "path": "/api/receipts",
+    "status": 200,
+    "latency_ms": 3963.08
+  },
+  "Knowledge Docs": {
+    "method": "GET",
+    "path": "/api/knowledge",
+    "status": 200,
+    "latency_ms": 4317.05
+  },
+  "Model Runs": {
+    "method": "GET",
+    "path": "/api/models/runs",
+    "status": 200,
+    "latency_ms": 4352.37
+  },
+  "Users List (Admin)": {
+    "method": "GET",
+    "path": "/api/users",
+    "status": 200,
+    "latency_ms": 4339.93
+  },
+  "Admin DB Registry": {
+    "method": "GET",
+    "path": "/api/admin-system/database-registry",
+    "status": 200,
+    "latency_ms": 2353.89
+  },
+  "Master Catalog Summary": {
+    "method": "GET",
+    "path": "/api/admin-system/master-catalogs-summary",
+    "status": 0,
+    "latency_ms": 35001.12,
+    "error": "timed out"
+  },
+  "Catalog Search (Medical)": {
+    "method": "GET",
+    "path": "/api/catalog/search?q=Paracetamol",
+    "status": 200,
+    "latency_ms": 7613.39
+  },
+  "chat_owner": {
+    "status": 200,
+    "latency_ms": 7074.0
+  },
+  "chat_associate_rbac": {
+    "status": 403,
+    "latency_ms": 3934.11,
+    "blocked": true
+  },
+  "latency_stats": {
+    "min_ms": 2353.89,
+    "mean_ms": 5585.17,
+    "p95_ms": 23819.74,
+    "max_ms": 23819.74
+  }
+}

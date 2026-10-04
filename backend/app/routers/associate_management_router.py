@@ -9,7 +9,7 @@ Allows:
 """
 
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from ..dependencies import get_admin_db, get_current_user, require_roles
 from ..models import Business, User, UserPermission
 from ..security import hash_password
+from ..rate_limit import limiter
 
 router = APIRouter(prefix="/api/business/associates", tags=["Associate Management"])
 
@@ -83,7 +84,9 @@ def list_business_associates(
 
 
 @router.post("", status_code=201)
+@limiter.limit("10/minute")
 def create_associate(
+    request: Request,
     body: AssociateCreate,
     user: User = Depends(require_roles("business_owner", "admin")),
     admin_db: Session = Depends(get_admin_db)

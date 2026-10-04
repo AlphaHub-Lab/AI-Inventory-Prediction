@@ -66,6 +66,6 @@ def refresh_operational_insights(db: Session) -> None:
     for product in db.query(Product).filter(Product.status == "active").all():
         evaluate_expiry(db, product)
         evaluate_waste(db, product)
-        if product.current_stock <= product.reorder_point:
+        if not product.is_weight_based and product.reorder_point > 0 and product.current_stock * 5 < product.reorder_point:
             build_reorder(db, product)
     db.commit()
