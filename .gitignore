@@ -5,6 +5,9 @@ backend/inventory.db
 backend/inventory_demo.db
 backend/indian_supermarket.db
 node_modules/
+release/
+backend/build/
+backend/dist/
 frontend/dist/
 .env
 data/benchmark_results.json

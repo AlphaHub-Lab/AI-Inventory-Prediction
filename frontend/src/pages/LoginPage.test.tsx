@@ -3,9 +3,9 @@ import { describe, expect, it } from 'vitest'
 import LoginPage from './LoginPage'
 
 describe('LoginPage', () => {
-  it('shows the seeded development sign-in', () => {
+  it('shows an empty sign-in form without prefilled credentials', () => {
     render(<LoginPage onLogin={() => undefined} />)
-    expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument()
-    expect(screen.getByDisplayValue('admin@inventory.example.com')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /sign in securely/i })).toBeInTheDocument()
+    expect(screen.getByLabelText(/work email/i)).toHaveValue('')
   })
 })

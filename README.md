@@ -14,6 +14,8 @@ FastAPI ── SQLAlchemy ── PostgreSQL (Docker)
    └── chatbot intent router ── live data tools + RAG knowledge chunks
 ```
 
+The desktop app reuses this renderer and API. Electron starts the FastAPI service on an ephemeral loopback-only port; PostgreSQL remains behind the API. The database is configured on first launch and stored encrypted in the OS credential store.
+
 Quantitative chatbot answers are produced by live database tools. Policy/help answers retrieve a chunk from the seeded knowledge base and return its source metadata. The optional `LLM_API_KEY`/`LLM_MODEL` configuration is reserved for a provider adapter; no secret reaches the browser.
 
 ## Database ERD
@@ -60,6 +62,49 @@ Seed accounts:
 | Associate | `staff@inventory.example.com` | `Staff123!` |
 
 There is no public registration route. Administrators provision businesses, owners, and associates. Business owners grant associates their operational permissions.
+
+## Desktop application
+
+The Electron desktop client packages the existing React renderer and a per-platform PyInstaller build of the FastAPI service. It does not create or migrate a production database on the user's machine. Connect it to a provisioned PostgreSQL database with the existing Stockwise schema. The connection URL is encrypted with Electron `safeStorage`; the randomly generated JWT signing key stays in the same encrypted application-data file and is passed only to the local backend process.
+
+Desktop requirements: Python 3.12, Node.js 22.12 or newer, npm, and a reachable PostgreSQL database. To use the local Docker database, first follow Quick start through `docker compose up -d --wait db`, then apply migrations and seed data from the project root:
+
+```powershell
+Set-Location backend
+alembic upgrade head
+python -m app.seed
+Set-Location ..
+```
+
+Install backend build/runtime dependencies and npm packages:
+
+```powershell
+python -m pip install -r requirements-desktop.txt
+npm install
+npm --prefix frontend install
+npm run desktop
+```
+
+On first launch, enter the central/admin database PostgreSQL connection URL. Remote connections must include `sslmode=require` or a stronger TLS mode. The API binds only to `127.0.0.1`; Electron chooses an available port, checks `/health` including a database query, and only then loads the renderer. Use **File → Change Database Connection…** to replace the saved URL. Upload, download, export, and print workflows continue to use Chromium's native file and print support. External web links open in the system browser.
+
+Development scripts:
+
+| Command | Purpose |
+| --- | --- |
+| `npm run web` | Run the existing Vite renderer only |
+| `npm run desktop` | Run Vite and the Electron desktop shell; requires backend Python dependencies |
+| `npm run build:renderer` | Type-check and build the web renderer |
+| `npm run build:backend` | Install desktop Python requirements and bundle the API for the current OS |
+| `npm run build` | Build the Windows installer on Windows, macOS artifacts on macOS, or Linux packages on Linux |
+| `npm run build:win` | Build the Windows NSIS installer (Windows host) |
+| `npm run build:mac` | Build the macOS app, DMG, and update ZIP (macOS host) |
+| `npm run build:linux` | Build AppImage and DEB packages (Linux host) |
+
+Desktop artifacts are written to `release/`. PyInstaller and Electron Builder create native binaries, so build the backend and installer on each target operating system. macOS distribution outside local use requires Apple signing/notarization credentials. Windows signing is recommended for public distribution. GitHub release publishing and update checks use the repository configured in `package.json`; publish signed artifacts with `GH_TOKEN` set in the release environment. The app checks for updates only when the user chooses **Help → Check for Updates…** and asks before downloading and restarting.
+
+The desktop client requires a live PostgreSQL connection. It has no offline database or synchronization implementation. Remote database credentials are required at first launch; there are no production credentials in the app bundle. Encrypted connection settings, generated forecasting models, and desktop logs are stored in the OS application-data directory (`connection.enc`, `models/`, and `logs/desktop.log`). Database schema creation and migrations remain an operator/deployment responsibility.
+
+For the conversion assessment and application-specific workflow checklist, see [DESKTOP_ASSESSMENT.md](DESKTOP_ASSESSMENT.md).
 
 The deterministic seed contains 30 products, 8 suppliers, 365 days of sales per product (10,950 rows), expiring inventory, promotions, holidays, forecasts, policies, and operational insights. Re-running seed preserves an existing database rather than overwriting it.
 

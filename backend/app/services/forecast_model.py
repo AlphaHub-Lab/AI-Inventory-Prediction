@@ -1,4 +1,5 @@
 from functools import lru_cache
+import os
 from pathlib import Path
 from datetime import date
 import math
@@ -8,7 +9,8 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[3]
-ARTIFACT_PATH = ROOT / "ml" / "artifacts" / "indian_supermarket_xgb.joblib"
+MODEL_DIR = Path(os.environ.get("STOCKWISE_MODEL_DIR", ROOT / "ml" / "artifacts"))
+ARTIFACT_PATH = MODEL_DIR / "indian_supermarket_xgb.joblib"
 FEATURES = (
     "sku_code",
     "category_code",
