@@ -8,8 +8,7 @@
     },
     "frontend": {
       "root": "frontend",
-      "framework": "vite",
-      "installCommand": "npm ci"
+      "framework": "vite"
     }
   },
   "rewrites": [
