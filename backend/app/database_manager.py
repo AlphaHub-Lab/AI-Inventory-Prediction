@@ -29,11 +29,14 @@ def get_base_postgres_url() -> str:
         raw_url = raw_url.replace("postgresql+psycopg2://", "postgresql+psycopg://", 1)
 
     parsed = urlparse(raw_url)
-    # url without path
-    base_parts = list(parsed)
-    base_parts[2] = "" # clear path
-    base_url = urlunparse(base_parts).rstrip("/") + "/"
-    return base_url
+    # Keep query parameters (such as sslmode=require) after removing the DB path.
+    return urlunparse(parsed._replace(path=""))
+
+
+def database_url_for(dbname: str, *, sqlalchemy_driver: bool = True) -> str:
+    """Build a database-specific URL while preserving URL query options."""
+    scheme = "postgresql+psycopg" if sqlalchemy_driver else "postgresql"
+    return urlunparse(urlparse(BASE_URL)._replace(scheme=scheme, path=f"/{dbname}"))
 
 BASE_URL = get_base_postgres_url()
 _ENGINES: Dict[str, Engine] = {}
@@ -44,7 +47,7 @@ def get_engine_for_db(dbname: str, *, ensure_schema: bool = True) -> Engine:
     """Get or create a pooled SQLAlchemy engine for a specific database."""
     safe_dbname = re.sub(r'[^a-zA-Z0-9_-]', '', dbname)
     if safe_dbname not in _ENGINES:
-        db_url = f"{BASE_URL}{safe_dbname}"
+        db_url = database_url_for(safe_dbname)
         _ENGINES[safe_dbname] = create_engine(
             db_url,
             pool_size=5,
@@ -453,8 +456,7 @@ def provision_new_business_database(
     Creates a new physical PostgreSQL database local_business_<business_id> on Supabase cluster,
     executes full schema provisioning, seeds default supplier and profile, and returns the dbname.
     """
-    import psycopg2
-    from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+    import psycopg
 
     local_dbname = f"local_business_{business_id}"
     parsed = urlparse(settings.database_url)
@@ -463,44 +465,32 @@ def provision_new_business_database(
         # In unified database architectures (e.g. Supabase postgres), all local tables exist directly
         return local_dbname
 
-    raw_psycopg_url = BASE_URL.replace("postgresql+psycopg2://", "postgresql://", 1)
-    
     # 1. Connect to postgres database to execute CREATE DATABASE
-    conn = psycopg2.connect(f"{raw_psycopg_url}postgres")
-    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-    cur = conn.cursor()
-    cur.execute("SELECT 1 FROM pg_database WHERE datname = %s;", (local_dbname,))
-    if not cur.fetchone():
-        cur.execute(f'CREATE DATABASE "{local_dbname}";')
-    cur.close()
-    conn.close()
+    with psycopg.connect(database_url_for("postgres", sqlalchemy_driver=False), autocommit=True) as conn:
+        if not conn.execute("SELECT 1 FROM pg_database WHERE datname = %s;", (local_dbname,)).fetchone():
+            conn.execute(f'CREATE DATABASE "{local_dbname}";')
 
     # 2. Connect to the newly created local database and apply full DDL
-    local_conn = psycopg2.connect(f"{raw_psycopg_url}{local_dbname}")
-    local_cur = local_conn.cursor()
-    local_cur.execute(LOCAL_DB_DDL)
+    with psycopg.connect(database_url_for(local_dbname, sqlalchemy_driver=False), autocommit=True) as local_conn:
+        local_conn.execute(LOCAL_DB_DDL)
 
-    # 3. Insert Business Profile & Default Supplier
-    local_cur.execute("""
-        INSERT INTO business_profile (name, business_type, owner_email)
-        VALUES (%s, %s, %s)
-        ON CONFLICT DO NOTHING;
-    """, (business_name, business_type, owner_email))
+        # 3. Insert Business Profile & Default Supplier
+        local_conn.execute("""
+            INSERT INTO business_profile (name, business_type, owner_email)
+            VALUES (%s, %s, %s)
+            ON CONFLICT DO NOTHING;
+        """, (business_name, business_type, owner_email))
 
-    local_cur.execute("""
-        INSERT INTO suppliers (name, contact_person, email, phone)
-        VALUES ('Primary Supplier', 'Accounts Department', %s, '+91 9000000000')
-        ON CONFLICT (name) DO NOTHING;
-    """, (owner_email,))
+        local_conn.execute("""
+            INSERT INTO suppliers (name, contact_person, email, phone)
+            VALUES ('Primary Supplier', 'Accounts Department', %s, '+91 9000000000')
+            ON CONFLICT (name) DO NOTHING;
+        """, (owner_email,))
 
-    local_cur.execute("""
-        INSERT INTO customers (name, phone, email)
-        VALUES ('Walk-in Customer', '9999999999', 'walkin@store.local')
-        ON CONFLICT DO NOTHING;
-    """)
-
-    local_conn.commit()
-    local_cur.close()
-    local_conn.close()
+        local_conn.execute("""
+            INSERT INTO customers (name, phone, email)
+            VALUES ('Walk-in Customer', '9999999999', 'walkin@store.local')
+            ON CONFLICT DO NOTHING;
+        """)
 
     return local_dbname

@@ -1,10 +1,13 @@
 from contextlib import asynccontextmanager
+import os
+import secrets
 from pathlib import Path
 from alembic import command
 from alembic.config import Config
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from .config import get_settings
@@ -16,6 +19,7 @@ from .routers.associate_management_router import router as associate_router
 from .routers.admin_management_router import router as admin_system_router
 from .routers.inventory_system_router import router as inventory_system_router
 from .rate_limit import limiter
+from .db import engine
 
 settings = get_settings()
 
@@ -23,7 +27,6 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    import os
     if not (os.getenv("SKIP_ALEMBIC_STARTUP") == "1" or settings.skip_alembic_startup or "inventory_system" in settings.database_url):
         try:
             config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
@@ -62,10 +65,25 @@ async def http_error(_: Request, exc: HTTPException):
 @app.get("/health", tags=["system"])
 @app.get("/api/health", tags=["system"])
 def health():
-    return {
-        "status": "ok",
-        "service": settings.app_name
-    }
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+    return {"status": "ok", "service": settings.app_name}
+
+
+@app.post("/desktop/shutdown", tags=["system"], include_in_schema=False)
+def desktop_shutdown(request: Request, x_desktop_shutdown_token: str = Header(default="")):
+    expected = os.getenv("DESKTOP_SHUTDOWN_TOKEN", "")
+    client_host = request.client.host if request.client else ""
+    if not expected or client_host not in {"127.0.0.1", "::1"} or not secrets.compare_digest(x_desktop_shutdown_token, expected):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    server = getattr(request.app.state, "desktop_server", None)
+    if server is None:
+        raise HTTPException(status_code=503, detail="Desktop shutdown is unavailable")
+    server.should_exit = True
+    return {"status": "shutting_down"}
 
 
 # Include sub-routers first so more specific paths match

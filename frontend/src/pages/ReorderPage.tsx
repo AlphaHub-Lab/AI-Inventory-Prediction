@@ -31,7 +31,7 @@ import {
   UploadCloud,
   X
 } from 'lucide-react'
-import { api } from '../lib/api'
+import { api, apiResponse } from '../lib/api'
 import LoadingState from '../components/LoadingState'
 import type {
   PendingReorderItem,
@@ -207,15 +207,11 @@ export default function ReorderPage({ currentUser }: { currentUser: User }) {
   // 1. Export CSV
   async function handleExportCSV() {
     try {
-      const token = sessionStorage.getItem('inventory_access_token') || ''
       let exportUrl = '/api/reorders/export-csv'
       if (selectedItemIds.length > 0) {
         exportUrl += `?ids=${selectedItemIds.join(',')}`
       }
-      const response = await fetch(exportUrl, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {}
-      })
-      if (!response.ok) throw new Error('Failed to generate CSV sheet')
+      const response = await apiResponse(exportUrl)
       const blob = await response.blob()
       const url = window.URL.createObjectURL(blob)
       const a = document.createElement('a')

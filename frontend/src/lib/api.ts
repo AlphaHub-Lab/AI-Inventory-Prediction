@@ -1,4 +1,12 @@
 const API_ROOT = import.meta.env.VITE_API_URL || ''
+let desktopApiRoot: Promise<string> | undefined
+
+function apiRoot(): Promise<string> {
+  if (API_ROOT) return Promise.resolve(API_ROOT)
+  if (!window.stockwiseDesktop) return Promise.resolve('')
+  desktopApiRoot ??= window.stockwiseDesktop.getApiBaseUrl()
+  return desktopApiRoot
+}
 
 let inMemoryToken: string | null = null
 let refreshRequest: Promise<string | null | false> | null = null
@@ -15,7 +23,7 @@ export const clearSession = () => {
   inMemoryToken = null
 }
 
-async function send<T>(path: string, init: RequestInit, token = getToken()): Promise<Response> {
+async function send(path: string, init: RequestInit, token = getToken()): Promise<Response> {
   const headers = new Headers(init.headers)
   if (token) {
     headers.set('Authorization', `Bearer ${token}`)
@@ -25,7 +33,8 @@ async function send<T>(path: string, init: RequestInit, token = getToken()): Pro
   }
 
   try {
-    return await fetch(`${API_ROOT}${path}`, {
+    const root = await apiRoot()
+    return await fetch(`${root}${path}`, {
       ...init,
       headers,
       credentials: 'include' // Always transmit HTTP cookies in real time (Zero localStorage)
@@ -40,7 +49,8 @@ async function refreshAccessToken(): Promise<string | null | false> {
     refreshRequest = (async () => {
       let response: Response
       try {
-        response = await fetch(`${API_ROOT}/api/auth/refresh`, { method: 'POST', credentials: 'include' })
+        const root = await apiRoot()
+        response = await fetch(`${root}/api/auth/refresh`, { method: 'POST', credentials: 'include' })
       } catch {
         return false
       }
@@ -54,7 +64,7 @@ async function refreshAccessToken(): Promise<string | null | false> {
   return refreshRequest
 }
 
-export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function apiResponse(path: string, init: RequestInit = {}): Promise<Response> {
   let response = await send(path, init)
   const authRoute = ['/api/auth/login', '/api/auth/refresh', '/api/auth/logout'].includes(path)
   if (response.status === 401 && !authRoute) {
@@ -67,11 +77,17 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     }
   }
 
-  if (response.status === 204) return undefined as T
-  const payload = await response.json().catch(() => null)
   if (!response.ok) {
+    const payload = await response.json().catch(() => null)
     const message = payload?.error?.message || (typeof payload?.error === 'string' ? payload.error : null) || payload?.detail || payload?.message
     throw new Error(message || (response.status === 429 ? 'Too many sign-in attempts. Wait a minute, then try again.' : `The request failed (${response.status}). Please try again.`))
   }
+  return response
+}
+
+export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await apiResponse(path, init)
+  if (response.status === 204) return undefined as T
+  const payload = await response.json().catch(() => null)
   return payload as T
 }

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none';">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connect Stockwise AI</title>
+  <style>
+    :root { color-scheme: dark; font: 15px/1.5 Segoe UI, system-ui, sans-serif; background: #0b1220; color: #e5edf5; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 28px; }
+    main { width: min(540px, 100%); padding: 34px; border: 1px solid #26354a; border-radius: 18px; background: #111c2d; box-shadow: 0 24px 80px #0005; }
+    .mark { color: #2dd4bf; font-size: 13px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; }
+    h1 { margin: 12px 0 8px; font-size: 27px; }
+    p { color: #a7b6c8; }
+    label { display: block; margin: 26px 0 8px; font-weight: 600; }
+    input { width: 100%; border: 1px solid #41536a; border-radius: 9px; padding: 12px; color: #e5edf5; background: #091321; font: 13px/1.5 ui-monospace, monospace; }
+    input:focus { outline: 2px solid #2dd4bf; border-color: transparent; }
+    small { display: block; margin-top: 8px; color: #8fa1b6; }
+    button { width: 100%; margin-top: 22px; border: 0; border-radius: 9px; padding: 12px; color: #062522; background: #2dd4bf; font: 700 15px Segoe UI, sans-serif; cursor: pointer; }
+    button:disabled { opacity: .55; cursor: wait; }
+    #status { min-height: 24px; margin: 14px 0 0; color: #fca5a5; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="mark">Stockwise AI</div>
+    <h1>Connect your inventory database</h1>
+    <p>The desktop app runs its API locally and connects to your existing Stockwise admin PostgreSQL database. Your connection is encrypted with the operating system credential store.</p>
+    <form id="setup">
+      <label for="database-url">PostgreSQL connection URL</label>
+      <input id="database-url" type="password" required autocomplete="off" placeholder="postgresql+psycopg://user:password@host:5432/database">
+      <small>Use the admin database connection string for a PostgreSQL cluster that already has the Stockwise schema and migrations applied. Remote connections must support TLS.</small>
+      <button id="connect" type="submit">Connect and start</button>
+      <p id="status" role="status" aria-live="polite"></p>
+    </form>
+  </main>
+  <script>
+    const form = document.querySelector('#setup')
+    const input = document.querySelector('#database-url')
+    const button = document.querySelector('#connect')
+    const status = document.querySelector('#status')
+    status.textContent = new URLSearchParams(location.search).get('error') || ''
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault()
+      button.disabled = true
+      status.textContent = 'Checking the database connection…'
+      const result = await window.stockwiseDesktop.saveDatabaseUrl(input.value)
+      if (result.ok) return
+      status.textContent = result.error || 'Could not connect. Check the database URL and try again.'
+      button.disabled = false
+    })
+  </script>
+</body>
+</html>

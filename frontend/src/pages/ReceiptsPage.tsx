@@ -20,7 +20,7 @@ import {
   Upload,
   X
 } from 'lucide-react'
-import { api, getToken } from '../lib/api'
+import { api, apiResponse } from '../lib/api'
 import type { ReceiptImport, ReceiptItem, User } from '../types'
 import LoadingState from '../components/LoadingState'
 
@@ -92,20 +92,10 @@ export default function ReceiptsPage({ currentUser }: { currentUser: User }) {
     formData.append('file', file)
 
     try {
-      const token = getToken()
-      const headers: Record<string, string> = {}
-      if (token) headers['Authorization'] = `Bearer ${token}`
-      const response = await fetch('/api/receipts/upload', {
+      const response = await apiResponse('/api/receipts/upload', {
         method: 'POST',
-        headers,
-        credentials: 'include',
         body: formData
       })
-
-      if (!response.ok) {
-        const errJson = await response.json().catch(() => ({}))
-        throw new Error(errJson.error?.message || errJson.detail || 'Upload failed')
-      }
 
       const result = await response.json()
       setSuccessMsg(`Receipt "${file.name}" uploaded and extracted successfully! Please review items below.`)

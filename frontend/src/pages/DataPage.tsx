@@ -23,7 +23,7 @@ import {
   UserPlus,
   X
 } from 'lucide-react'
-import { api } from '../lib/api'
+import { api, apiResponse } from '../lib/api'
 import { StatusBadge } from '../components/StatusBadge'
 import LoadingState from '../components/LoadingState'
 
@@ -294,6 +294,20 @@ export default function DataPage({ kind, currentUser }: { kind: string; currentU
     }
   }
 
+  async function handleSalesExport() {
+    try {
+      const response = await apiResponse('/api/sales/export')
+      const url = URL.createObjectURL(await response.blob())
+      const link = document.createElement('a')
+      link.href = url
+      link.download = 'sales.csv'
+      link.click()
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not export sales CSV.')
+    }
+  }
+
   // Add User
   async function handleCreateUser(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -494,9 +508,9 @@ export default function DataPage({ kind, currentUser }: { kind: string; currentU
               <button className="secondary-button" onClick={() => setShowImportModal(true)}>
                 <Upload size={16} /> Import CSV
               </button>
-              <a className="secondary-button" href="/api/sales/export">
+              <button className="secondary-button" onClick={handleSalesExport}>
                 <Download size={16} /> Export CSV
-              </a>
+              </button>
             </>
           )}
 

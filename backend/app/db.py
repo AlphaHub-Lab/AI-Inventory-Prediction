@@ -6,7 +6,18 @@ from .config import get_settings
 from .security import ALGORITHM
 
 settings = get_settings()
-engine = create_engine(settings.database_url, pool_pre_ping=True, pool_recycle=300, pool_size=10, max_overflow=20)
+
+
+def _sqlalchemy_database_url(value: str) -> str:
+    """Use the installed psycopg 3 driver for standard PostgreSQL URLs."""
+    if value.startswith("postgresql://"):
+        return value.replace("postgresql://", "postgresql+psycopg://", 1)
+    if value.startswith("postgresql+psycopg2://"):
+        return value.replace("postgresql+psycopg2://", "postgresql+psycopg://", 1)
+    return value
+
+
+engine = create_engine(_sqlalchemy_database_url(settings.database_url), pool_pre_ping=True, pool_recycle=300, pool_size=10, max_overflow=20, connect_args={"connect_timeout": 5})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
