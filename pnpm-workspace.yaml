@@ -1,2 +1,8 @@
+packages:
+  - 'frontend'
+
 allowBuilds:
   electron-winstaller: true
+  esbuild: true
+  '@tailwindcss/oxide': true
+
