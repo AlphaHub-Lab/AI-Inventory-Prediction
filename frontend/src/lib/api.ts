@@ -78,9 +78,28 @@ export async function apiResponse(path: string, init: RequestInit = {}): Promise
   }
 
   if (!response.ok) {
-    const payload = await response.json().catch(() => null)
-    const message = payload?.error?.message || (typeof payload?.error === 'string' ? payload.error : null) || payload?.detail || payload?.message
-    throw new Error(message || (response.status === 429 ? 'Too many sign-in attempts. Wait a minute, then try again.' : `The request failed (${response.status}). Please try again.`))
+    const text = await response.text().catch(() => '')
+    let payload: any = null
+    try {
+      payload = JSON.parse(text)
+    } catch {
+      payload = null
+    }
+    const message =
+      payload?.error?.message ||
+      (typeof payload?.error === 'string' ? payload.error : null) ||
+      payload?.detail ||
+      payload?.message ||
+      (text && !text.includes('<html') && text.length < 250 ? text : null)
+
+    const fallback =
+      response.status === 429
+        ? 'Too many sign-in attempts. Wait a minute, then try again.'
+        : response.status === 500 || response.status === 503
+        ? 'Database connection error. Please verify DATABASE_URL is configured in your Vercel Project Settings.'
+        : `The request failed (${response.status}). Please try again.`
+
+    throw new Error(message || fallback)
   }
   return response
 }
