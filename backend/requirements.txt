@@ -9,14 +9,8 @@ passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 python-multipart==0.0.20
 email-validator==2.2.0
-pandas>=2.2.3
-numpy>=2.0.0
-scikit-learn>=1.6.0
-xgboost>=2.1.0
 openpyxl>=3.1.5
 slowapi==0.1.9
 httpx==0.28.1
-pytest==8.3.5
-pytest-cov==6.1.1
 pypdf>=5.0.0
 Pillow>=10.0.0

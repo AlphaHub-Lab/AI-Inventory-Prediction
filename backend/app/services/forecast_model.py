@@ -4,8 +4,15 @@ from pathlib import Path
 from datetime import date
 import math
 
-import joblib
-import numpy as np
+try:
+    import joblib
+except ImportError:  # pragma: no cover
+    joblib = None
+
+try:
+    import numpy as np
+except ImportError:  # pragma: no cover
+    np = None
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -29,7 +36,7 @@ FEATURES = (
 
 @lru_cache(maxsize=1)
 def load_model_bundle() -> dict | None:
-    if not ARTIFACT_PATH.exists():
+    if joblib is None or not ARTIFACT_PATH.exists():
         return None
     return joblib.load(ARTIFACT_PATH)
 
@@ -41,7 +48,7 @@ def feature_row(
     target_date: date,
     history: list[float],
 ) -> np.ndarray | None:
-    if len(history) < 28:
+    if np is None or len(history) < 28:
         return None
     angle = 2 * math.pi * (target_date.timetuple().tm_yday - 1) / 365.25
     return np.asarray(

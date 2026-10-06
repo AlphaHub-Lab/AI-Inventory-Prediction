@@ -1,0 +1,22 @@
+# Desktop and Electron files
+electron/
+assets/
+release/
+scripts/build_desktop_backend.py
+scripts/generate_icons.py
+
+# Offline ML Training
+ml/
+
+# Test suites and caches
+tests/
+**/test_*.py
+**/.pytest_cache/
+**/*.test.ts
+**/*.test.tsx
+
+# Local environments and databases
+.env
+*.sqlite
+*.sqlite3
+*.db
