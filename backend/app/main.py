@@ -33,6 +33,11 @@ async def lifespan(app: FastAPI):
             command.upgrade(config, "head")
         except Exception as e:
             print(f"Warning on startup migration: {e}")
+    try:
+        from .seed import seed
+        seed()
+    except Exception as e:
+        print(f"Warning on startup database seeding: {e}")
     yield
     # Shutdown
 
@@ -59,6 +64,21 @@ async def http_error(_: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
         content={"error": {"message": str(exc.detail), "status": exc.status_code}}
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_: Request, exc: Exception):
+    err_str = str(exc)
+    err_lower = err_str.lower()
+    if any(k in err_lower for k in ["connection refused", "could not translate host name", "operationalerror", "connection to server at", "password authentication failed", "ssl connection", "relation does not exist", "undefinedtable"]):
+        return JSONResponse(
+            status_code=503,
+            content={"error": {"message": "Database error: Unable to connect or initialize. Please check your DATABASE_URL in Vercel Project Settings.", "status": 503}}
+        )
+    return JSONResponse(
+        status_code=500,
+        content={"error": {"message": f"Server error: {err_str}", "status": 500}}
     )
 
 
