@@ -1,6 +1,7 @@
 {
   "name": "inventory-intelligence-web",
   "private": true,
+  "packageManager": "pnpm@10.34.6",
   "version": "1.0.0",
   "type": "module",
   "scripts": { "dev": "vite", "build": "tsc -b && vite build", "preview": "vite preview", "test": "vitest run" },
