@@ -20,6 +20,10 @@ class Business(Base):
     master_database_name: Mapped[str] = mapped_column(String(63), default="master_grocery")
     local_database_name: Mapped[Optional[str]] = mapped_column(String(63), nullable=True, unique=True)
     owner_email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    owner_phone: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    owner_personal_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    phone: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    address: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -53,6 +57,16 @@ class AuthSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class OwnerEmailVerification(Base):
+    __tablename__ = "owner_email_verifications"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), index=True)
+    code_hash: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    consumed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class User(BusinessScoped, Base, TimestampMixin):
@@ -176,6 +190,8 @@ class CheckoutTransaction(BusinessScoped, Base):
     customer_name: Mapped[str] = mapped_column(String(180), default="Walk-in Customer")
     customer_phone: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     customer_id: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    customer_prescribed_by: Mapped[Optional[str]] = mapped_column(String(180), nullable=True)
+    customer_address: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     subtotal: Mapped[float] = mapped_column(Numeric(12, 2))
     discount: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
     tax: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
@@ -183,6 +199,7 @@ class CheckoutTransaction(BusinessScoped, Base):
     payment_method: Mapped[str] = mapped_column(String(20))
     payment_status: Mapped[str] = mapped_column(String(20), default="PAID")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    business: Mapped[Optional[Business]] = relationship()
     items: Mapped[List["CheckoutItem"]] = relationship(back_populates="transaction", cascade="all, delete-orphan")
 
 
@@ -192,6 +209,7 @@ class CheckoutItem(BusinessScoped, Base):
     transaction_id: Mapped[int] = mapped_column(ForeignKey("checkout_transactions.id"), index=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
     product_name: Mapped[str] = mapped_column(String(180))
+    product_sku: Mapped[str] = mapped_column(String(50), default="")
     quantity: Mapped[int] = mapped_column(Integer)
     unit_price: Mapped[float] = mapped_column(Numeric(12, 2))
     line_total: Mapped[float] = mapped_column(Numeric(12, 2))

@@ -56,6 +56,11 @@ class BusinessCreate(BaseModel):
     business_type: str = Field(pattern="^(medical|grocery|restaurant|food|stationery|dairy|clothing|others)$")
     owner_name: str = Field(min_length=2, max_length=120)
     owner_email: EmailStr
+    owner_personal_email: EmailStr
+    owner_phone: str = Field(min_length=5, max_length=40)
+    phone: str = Field(default="", max_length=40)
+    address: str = Field(default="", max_length=500)
+    email_verification_code: str = Field(min_length=6, max_length=6)
     owner_password: str = Field(min_length=12, max_length=128)
 
     @field_validator("owner_password")
@@ -64,6 +69,15 @@ class BusinessCreate(BaseModel):
         if not any(char.islower() for char in value) or not any(char.isupper() for char in value) or not any(char.isdigit() for char in value):
             raise ValueError("Password must include lowercase, uppercase, and numeric characters")
         return value
+
+
+class OwnerEmailCodeRequest(BaseModel):
+    email: EmailStr
+
+
+class OwnerEmailCodeVerify(BaseModel):
+    email: EmailStr
+    code: str = Field(min_length=6, max_length=6)
 
 
 class PermissionUpdate(BaseModel):
@@ -180,6 +194,7 @@ class CheckoutLineInput(BaseModel):
     quantity: int = Field(gt=0, le=100000)
     selected_weight_g: int | None = Field(default=None, gt=0, le=100000000)
     weight_unit: str | None = Field(default=None, pattern="^(kg|g)$")
+    unit_price: float | None = Field(default=None, ge=0, le=100000000)
 
 
 class CheckoutInput(BaseModel):
@@ -189,6 +204,8 @@ class CheckoutInput(BaseModel):
     customer_name: str = Field(default="Walk-in Customer", min_length=1, max_length=180)
     customer_phone: str | None = Field(default=None, max_length=40)
     customer_id: str | None = Field(default=None, max_length=80)
+    customer_prescribed_by: str | None = Field(default=None, max_length=180)
+    customer_address: str | None = Field(default=None, max_length=500)
     payment_method: str = Field(pattern="^(cash|upi|card|other)$")
     amount_received: float | None = Field(default=None, ge=0)
 
@@ -216,6 +233,7 @@ class WeightStockAdjustment(BaseModel):
 class CheckoutItemRead(BaseModel):
     product_id: int
     name: str
+    sku: str
     quantity: int
     unit_price: float
     total: float

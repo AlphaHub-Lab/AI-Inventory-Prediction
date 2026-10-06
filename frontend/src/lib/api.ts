@@ -1,6 +1,7 @@
 const API_ROOT = import.meta.env.VITE_API_URL || ''
 
 let inMemoryToken: string | null = null
+let refreshRequest: Promise<string | null | false> | null = null
 
 export const getToken = (): string | null => {
   return inMemoryToken
@@ -14,9 +15,8 @@ export const clearSession = () => {
   inMemoryToken = null
 }
 
-export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function send<T>(path: string, init: RequestInit, token = getToken()): Promise<Response> {
   const headers = new Headers(init.headers)
-  const token = getToken()
   if (token) {
     headers.set('Authorization', `Bearer ${token}`)
   }
@@ -24,15 +24,47 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     headers.set('Content-Type', 'application/json')
   }
 
-  let response: Response
   try {
-    response = await fetch(`${API_ROOT}${path}`, {
+    return await fetch(`${API_ROOT}${path}`, {
       ...init,
       headers,
       credentials: 'include' // Always transmit HTTP cookies in real time (Zero localStorage)
     })
   } catch {
     throw new Error('Unable to reach the server. Please check that the backend is running and try again.')
+  }
+}
+
+async function refreshAccessToken(): Promise<string | null | false> {
+  if (!refreshRequest) {
+    refreshRequest = (async () => {
+      let response: Response
+      try {
+        response = await fetch(`${API_ROOT}/api/auth/refresh`, { method: 'POST', credentials: 'include' })
+      } catch {
+        return false
+      }
+      if (!response.ok) return response.status === 401 ? null : false
+      const payload = await response.json().catch(() => null)
+      if (typeof payload?.access_token !== 'string') return null
+      setSession(payload.access_token)
+      return payload.access_token
+    })().finally(() => { refreshRequest = null })
+  }
+  return refreshRequest
+}
+
+export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  let response = await send(path, init)
+  const authRoute = ['/api/auth/login', '/api/auth/refresh', '/api/auth/logout'].includes(path)
+  if (response.status === 401 && !authRoute) {
+    const refreshedToken = await refreshAccessToken()
+    if (typeof refreshedToken === 'string') {
+      response = await send(path, init, refreshedToken)
+    } else if (refreshedToken === null) {
+      clearSession()
+      window.dispatchEvent(new Event('session-expired'))
+    }
   }
 
   if (response.status === 204) return undefined as T

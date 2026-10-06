@@ -7,7 +7,7 @@ import LoadingState from '../components/LoadingState'
 type Overview = { counts: Record<string, number>; active_accounts: number; sales_revenue: number; database_engine: string; database_bytes: number | null }
 type Account = { id: number; email: string; full_name: string; role: User['role']; is_active: boolean; created_at: string; business_id: number | null; business_name: string | null; audit_events: number; inventory_movements: number; chat_conversations: number; purchase_orders: number }
 type ActivityEvent = { id: number; actor: string; actor_email: string; action: string; entity: string; entity_id: string; details: Record<string, unknown>; created_at: string }
-type BusinessRow = { id: number; name: string; business_type: string; master_database_name: string; local_database_name: string | null; owner_email: string; is_active: boolean; created_at: string; accounts: number; products: number; sales: number }
+type BusinessRow = { id: number; name: string; business_type: string; master_database_name: string; local_database_name: string | null; owner_email: string; owner_phone?: string | null; owner_personal_email?: string | null; phone?: string | null; address?: string | null; is_active: boolean; created_at: string; accounts: number; products: number; sales: number }
 type AlertRow = { id: string; severity: 'critical' | 'warning' | 'info'; business_id: number; business_name: string; kind: string; count: number }
 type AdminTab = 'overview' | 'businesses' | 'accounts' | 'alerts' | 'activity'
 type Draft = { role: User['role']; is_active: boolean; business_id: number | null }
@@ -42,6 +42,10 @@ export default function AdminPage({ currentUser }: { currentUser: User }) {
   const [pageLoading, setPageLoading] = useState(true)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [personalEmail, setPersonalEmail] = useState('')
+  const [emailCode, setEmailCode] = useState('')
+  const [emailCodeSent, setEmailCodeSent] = useState(false)
+  const [verifiedPersonalEmail, setVerifiedPersonalEmail] = useState('')
 
   async function load() {
     setError('')
@@ -85,9 +89,30 @@ export default function AdminPage({ currentUser }: { currentUser: User }) {
     event.preventDefault(); setBusy(true); setError(''); setNotice('')
     const formElement = event.currentTarget; const form = new FormData(formElement)
     try {
-      await api('/api/admin/businesses', { method: 'POST', body: JSON.stringify({ name: String(form.get('business_name')).trim(), business_type: String(form.get('business_type')), owner_name: String(form.get('owner_name')).trim(), owner_email: String(form.get('owner_email')).trim(), owner_password: String(form.get('owner_password')) }) })
+      if (personalEmail.trim().toLowerCase() !== verifiedPersonalEmail.toLowerCase() || !emailCode) throw new Error('Verify the owner personal email before creating this workspace.')
+      await api('/api/admin/businesses', { method: 'POST', body: JSON.stringify({ name: String(form.get('business_name')).trim(), business_type: String(form.get('business_type')), owner_name: String(form.get('owner_name')).trim(), owner_email: String(form.get('owner_email')).trim(), owner_personal_email: personalEmail.trim(), owner_phone: String(form.get('owner_phone')).trim(), phone: String(form.get('business_phone')).trim(), address: String(form.get('business_address')).trim(), email_verification_code: emailCode, owner_password: String(form.get('owner_password')) }) })
       formElement.reset(); setShowBusinessForm(false); setNotice('Business workspace and owner account created.'); await load()
+      setPersonalEmail(''); setEmailCode(''); setEmailCodeSent(false); setVerifiedPersonalEmail('')
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not create business workspace.') }
+    finally { setBusy(false) }
+  }
+
+  async function sendOwnerCode() {
+    if (!personalEmail.trim()) { setError('Enter the owner personal email first.'); return }
+    setBusy(true); setError(''); setNotice('')
+    try {
+      await api('/api/admin/businesses/owner-email-code', { method: 'POST', body: JSON.stringify({ email: personalEmail.trim() }) })
+      setEmailCodeSent(true); setVerifiedPersonalEmail(''); setNotice('Verification code sent to the owner personal email.')
+    } catch (e) { setError(e instanceof Error ? e.message : 'Could not send the email verification code.') }
+    finally { setBusy(false) }
+  }
+
+  async function verifyOwnerCode() {
+    setBusy(true); setError(''); setNotice('')
+    try {
+      await api('/api/admin/businesses/verify-owner-email', { method: 'POST', body: JSON.stringify({ email: personalEmail.trim(), code: emailCode }) })
+      setVerifiedPersonalEmail(personalEmail.trim()); setNotice('Owner personal email verified.')
+    } catch (e) { setError(e instanceof Error ? e.message : 'Could not verify the email code.') }
     finally { setBusy(false) }
   }
 
@@ -97,6 +122,16 @@ export default function AdminPage({ currentUser }: { currentUser: User }) {
       await api(`/api/admin/businesses/${business.id}`, { method: 'PUT', body: JSON.stringify({ is_active: !business.is_active }) })
       setNotice(`${business.name} ${business.is_active ? 'suspended' : 'reactivated'}.`); await load()
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not update workspace status.') }
+    finally { setBusy(false) }
+  }
+
+  async function deleteBusiness(business: BusinessRow) {
+    if (busy || !window.confirm(`Permanently delete ${business.name} and all of its accounts, inventory, sales, receipts, and operational history? This cannot be undone.`)) return
+    setBusy(true); setError(''); setNotice('')
+    try {
+      await api(`/api/admin/businesses/${business.id}`, { method: 'DELETE' })
+      setNotice(`${business.name} and its workspace data were permanently deleted.`); await load()
+    } catch (e) { setError(e instanceof Error ? e.message : 'Could not delete the business workspace.') }
     finally { setBusy(false) }
   }
 
@@ -116,6 +151,7 @@ export default function AdminPage({ currentUser }: { currentUser: User }) {
     setBusy(true); setError(''); setNotice('')
     try {
       await api(`/api/admin/accounts/${account.id}`, { method: 'DELETE' })
+      setAccounts(prev => prev.filter(row => row.id !== account.id))
       setDrafts(prev => { const next = { ...prev }; delete next[account.id]; return next })
       setNotice(`Account ${account.email} was permanently deleted.`); await load()
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not delete account.') }
@@ -159,10 +195,10 @@ export default function AdminPage({ currentUser }: { currentUser: User }) {
       {tab === 'businesses' && <div className="admin-section">
         <div className="admin-section-heading"><div><h2>Business workspaces</h2><p>Each business has a dedicated owner email and isolated operational data.</p></div><button className="primary-button" onClick={() => setShowBusinessForm(v => !v)}><UserPlus size={16}/>{showBusinessForm ? 'Close form' : 'Add business'}</button></div>
         {showBusinessForm && <form className="business-create-form" onSubmit={createBusiness}>
-          <label>Business name<input name="business_name" required minLength={2} maxLength={180} placeholder="Northstar Pharmacy"/></label><label>Business type<select name="business_type" required><option value="medical">Medical store</option><option value="grocery">Grocery store</option><option value="restaurant">Restaurant / food business</option><option value="stationery">Stationery store</option><option value="dairy">Dairy store</option></select></label><label>Owner name<input name="owner_name" required minLength={2} maxLength={120}/></label><label>Dedicated owner email<input name="owner_email" type="email" required placeholder="owner@business.com"/></label><label>Temporary password<input name="owner_password" type="password" required minLength={12} maxLength={128} autoComplete="new-password"/><small>At least 12 characters with uppercase, lowercase, and a number.</small></label><button className="primary-button" disabled={busy}>Create workspace</button>
+          <label>Business name<input name="business_name" required minLength={2} maxLength={180} placeholder="Northstar Pharmacy"/></label><label>Business type<select name="business_type" required><option value="medical">Medical store</option><option value="grocery">Grocery store</option><option value="restaurant">Restaurant / food business</option><option value="stationery">Stationery store</option><option value="dairy">Dairy store</option></select></label><label>Business mobile<input name="business_phone" type="tel" maxLength={40}/></label><label className="admin-wide-field">Business address<input name="business_address" maxLength={500}/></label><label>Owner name<input name="owner_name" required minLength={2} maxLength={120}/></label><label>Owner mobile number<input name="owner_phone" type="tel" required minLength={5} maxLength={40}/></label><label>Account email<input name="owner_email" type="email" required placeholder="owner@business.com"/></label><label>Owner personal email<input type="email" required value={personalEmail} onChange={e => { setPersonalEmail(e.target.value); setVerifiedPersonalEmail('') }} placeholder="personal@email.com"/><button type="button" className="row-action" disabled={busy || !personalEmail.trim()} onClick={() => void sendOwnerCode()}>{emailCodeSent ? 'Resend code' : 'Send verification code'}</button></label>{emailCodeSent && <label>Six-digit email code<input inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={emailCode} onChange={e => setEmailCode(e.target.value.replace(/\D/g, '').slice(0, 6))}/><button type="button" className="row-action" disabled={busy || emailCode.length !== 6 || verifiedPersonalEmail.toLowerCase() === personalEmail.trim().toLowerCase()} onClick={() => void verifyOwnerCode()}>{verifiedPersonalEmail.toLowerCase() === personalEmail.trim().toLowerCase() ? 'Email verified' : 'Verify code'}</button></label>}<label>Temporary password<input name="owner_password" type="password" required minLength={12} maxLength={128} autoComplete="new-password"/><small>At least 12 characters with uppercase, lowercase, and a number.</small></label><button className="primary-button" disabled={busy || verifiedPersonalEmail.toLowerCase() !== personalEmail.trim().toLowerCase()}>Create workspace</button>
         </form>}
         <div className="table-wrap"><table className="admin-table business-table"><thead><tr><th>Business</th><th>Type / master catalog</th><th>Local database</th><th>Owner email</th><th>Accounts</th><th>Products</th><th>Sales</th><th>Status</th><th/></tr></thead><tbody>
-          {businesses.map(business => <tr key={business.id}><td><strong>{business.name}</strong><small>Created {readableDate(business.created_at)}</small></td><td><select aria-label={`Business type for ${business.name}`} value={business.business_type} disabled={busy} onChange={event => void setBusinessType(business, event.target.value)}><option value="medical">Medical</option><option value="grocery">Grocery</option><option value="restaurant">Restaurant</option><option value="stationery">Stationery</option><option value="dairy">Dairy</option></select><small>{business.master_database_name}</small></td><td>{business.local_database_name || 'Not configured'}</td><td>{business.owner_email}</td><td>{business.accounts}</td><td>{business.products}</td><td>{business.sales}</td><td><span className={business.is_active ? 'business-state active' : 'business-state disabled'}>{business.is_active ? 'Active' : 'Suspended'}</span></td><td><button className="row-action" disabled={busy} onClick={() => toggleBusiness(business)}>{business.is_active ? 'Suspend' : 'Reactivate'}</button></td></tr>)}
+          {businesses.map(business => <tr key={business.id}><td><strong>{business.name}</strong><small>Created {readableDate(business.created_at)}</small></td><td><select aria-label={`Business type for ${business.name}`} value={business.business_type} disabled={busy} onChange={event => void setBusinessType(business, event.target.value)}><option value="medical">Medical</option><option value="grocery">Grocery</option><option value="restaurant">Restaurant</option><option value="stationery">Stationery</option><option value="dairy">Dairy</option></select><small>{business.master_database_name}</small></td><td>{business.local_database_name || 'Not configured'}</td><td>{business.owner_email}<small>{business.owner_phone || 'Owner phone not provided'}</small><small>{business.phone || business.address || 'Business contact details not provided'}</small></td><td>{business.accounts}</td><td>{business.products}</td><td>{business.sales}</td><td><span className={business.is_active ? 'business-state active' : 'business-state disabled'}>{business.is_active ? 'Active' : 'Suspended'}</span></td><td><div className="admin-account-actions"><button className="row-action" disabled={busy} onClick={() => toggleBusiness(business)}>{business.is_active ? 'Suspend' : 'Reactivate'}</button><button className="row-action delete-account-action" disabled={busy} onClick={() => void deleteBusiness(business)} aria-label={`Delete business ${business.name}`}><Trash2 size={13}/><span>Delete</span></button></div></td></tr>)}
           {!businesses.length && <tr><td colSpan={9} className="empty-row">No business workspaces yet. Add a business to create its owner account.</td></tr>}
         </tbody></table></div>
       </div>}

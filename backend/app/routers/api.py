@@ -1,21 +1,25 @@
 from datetime import date, datetime, timedelta
 from io import StringIO
 import csv
+import logging
 import re
 import secrets
+import hashlib
+import smtplib
 import uuid
+from email.message import EmailMessage
 from math import ceil
 from decimal import Decimal, ROUND_HALF_UP
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import case, func, or_, text, update
+from sqlalchemy import case, func, or_, select, text, update
 from sqlalchemy.orm import Session, joinedload
-from ..db import engine, get_db
+from ..db import Base, engine, get_db
 from ..dependencies import get_current_user, oauth2_scheme, require_permission, require_roles
-from ..models import (AuditLog, AuthSession, Business, Category, ChatbotConversation, ChatbotMessage, CheckoutItem, CheckoutTransaction, ExpiryAlert, Forecast, InventoryBatch, InventoryTransaction,
+from ..models import (AuditLog, AuthSession, Business, Category, ChatbotConversation, ChatbotMessage, CheckoutItem, CheckoutTransaction, ExpiryAlert, Forecast, InventoryBatch, InventoryTransaction, OwnerEmailVerification,
                       KnowledgeChunk, KnowledgeDocument, ModelRun, Product, PurchaseOrder, PurchaseOrderItem, ReorderRecommendation,
                       Sale, Supplier, User, UserPermission, WastePrediction)
-from ..schemas import (AdminUserUpdate, BatchInput, BulkBatchInput, BusinessCreate, BusinessStatusUpdate, CategoryInput, ChatRequest, CheckoutInput, ConvertReordersInput, ForecastRequest, LoginRequest, PermissionUpdate, POItemInput, ProductInput, PurchaseOrderInput,
+from ..schemas import (AdminUserUpdate, BatchInput, BulkBatchInput, BusinessCreate, BusinessStatusUpdate, OwnerEmailCodeRequest, OwnerEmailCodeVerify, CategoryInput, ChatRequest, CheckoutInput, ConvertReordersInput, ForecastRequest, LoginRequest, PermissionUpdate, POItemInput, ProductInput, PurchaseOrderInput,
                        ReorderAction, SaleInput, StatusUpdate, StockAdjustment, SupplierInput, TokenResponse, UserCreate, UserRead, WeightStockAdjustment,
                        WhatIfRequest)
 from ..security import create_token, hash_password, verify_password
@@ -25,6 +29,12 @@ from ..services.operations import build_reorder, refresh_operational_insights
 from ..rate_limit import limiter
 
 api = APIRouter(prefix="/api")
+logger = logging.getLogger(__name__)
+
+
+def owner_code_hash(code: str) -> str:
+    from ..config import get_settings
+    return hashlib.sha256(f"{get_settings().secret_key}:{code}".encode()).hexdigest()
 
 
 def audit(db: Session, user: User | None, action: str, entity: str, entity_id: int | str, payload: dict | None = None) -> None:
@@ -81,18 +91,28 @@ def login(request: Request, body: LoginRequest, response: Response, db: Session 
 
     # Set real-time HTTP-only cookies (zero localStorage required)
     cookie_max_age = get_settings().refresh_token_days * 86400
+    access_cookie_max_age = get_settings().access_token_minutes * 60
     response.set_cookie(
         key="access_token",
         value=access_token,
         httponly=True,
         samesite="lax",
-        max_age=cookie_max_age,
+        max_age=access_cookie_max_age,
         secure=False,
         path="/"
     )
     response.set_cookie(
         key="session_token",
         value=access_token,
+        httponly=True,
+        samesite="lax",
+        max_age=access_cookie_max_age,
+        secure=False,
+        path="/"
+    )
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
         httponly=True,
         samesite="lax",
         max_age=cookie_max_age,
@@ -128,10 +148,13 @@ def login(request: Request, body: LoginRequest, response: Response, db: Session 
 
 
 @api.post("/auth/refresh", tags=["auth"])
-def refresh_token(refresh_token: str, db: Session = Depends(get_db)):
+def refresh_token(request: Request, response: Response, refresh_token: str | None = Query(default=None), db: Session = Depends(get_db)):
     from jose import JWTError, jwt
     from ..config import get_settings
     from ..security import ALGORITHM
+    refresh_token = refresh_token or request.cookies.get("refresh_token")
+    if not refresh_token:
+        raise HTTPException(401, "Invalid refresh token")
     try:
         payload = jwt.decode(refresh_token, get_settings().secret_key, algorithms=[ALGORITHM])
         if payload.get("type") != "refresh" or not payload.get("sid"):
@@ -146,13 +169,20 @@ def refresh_token(refresh_token: str, db: Session = Depends(get_db)):
         db.commit()
     except (JWTError, ValueError):
         raise HTTPException(401, "Invalid refresh token")
-    return {"access_token": create_token(user.email, user.role, session.id), "refresh_token": create_token(user.email, user.role, session.id, "refresh"), "token_type": "bearer"}
+    access_token = create_token(user.email, user.role, session.id)
+    refresh_token = create_token(user.email, user.role, session.id, "refresh")
+    settings = get_settings()
+    for cookie_name in ("access_token", "session_token"):
+        response.set_cookie(cookie_name, access_token, httponly=True, samesite="lax", max_age=settings.access_token_minutes * 60, secure=False, path="/")
+    response.set_cookie("refresh_token", refresh_token, httponly=True, samesite="lax", max_age=settings.refresh_token_days * 86400, secure=False, path="/")
+    return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
 
 
 @api.post("/auth/logout", tags=["auth"])
 def logout(response: Response, request: Request, db: Session = Depends(get_db)):
     response.delete_cookie(key="access_token", path="/")
     response.delete_cookie(key="session_token", path="/")
+    response.delete_cookie(key="refresh_token", path="/")
 
     # Revoke session in auth_sessions and sessions table
     token = request.cookies.get("access_token") or request.cookies.get("session_token")
@@ -445,7 +475,8 @@ def admin_businesses(db: Session = Depends(get_db), _: User = Depends(require_ro
     return [{
         "id": business.id, "name": business.name, "business_type": business.business_type,
         "master_database_name": business.master_database_name, "local_database_name": business.local_database_name,
-        "owner_email": business.owner_email,
+        "owner_email": business.owner_email, "owner_phone": business.owner_phone,
+        "owner_personal_email": business.owner_personal_email, "phone": business.phone, "address": business.address,
         "is_active": business.is_active, "created_at": business.created_at,
         "accounts": account_counts.get(business.id, 0),
         "products": product_counts.get(business.id, 0),
@@ -457,9 +488,19 @@ def admin_businesses(db: Session = Depends(get_db), _: User = Depends(require_ro
 def create_business(body: BusinessCreate, db: Session = Depends(get_db), actor: User = Depends(require_roles("admin"))):
     if db.query(User).filter_by(email=body.owner_email).first():
         raise HTTPException(409, "An account with this owner email already exists")
+    verification = db.query(OwnerEmailVerification).filter(
+        func.lower(OwnerEmailVerification.email) == body.owner_personal_email.lower(),
+        OwnerEmailVerification.code_hash == owner_code_hash(body.email_verification_code),
+        OwnerEmailVerification.verified_at.is_not(None), OwnerEmailVerification.consumed_at.is_(None),
+        OwnerEmailVerification.expires_at > datetime.utcnow(),
+    ).order_by(OwnerEmailVerification.id.desc()).with_for_update().first()
+    if not verification:
+        raise HTTPException(400, "Verify the owner's personal email before creating the business")
     business_type = body.business_type
     business = Business(
         name=body.name.strip(), owner_email=body.owner_email, business_type=business_type,
+        owner_phone=body.owner_phone.strip(), owner_personal_email=body.owner_personal_email,
+        phone=body.phone.strip() or None, address=body.address.strip() or None,
         master_database_name=f"master_{business_type}", is_active=True,
     )
     db.add(business)
@@ -467,12 +508,62 @@ def create_business(body: BusinessCreate, db: Session = Depends(get_db), actor: 
     business.local_database_name = f"local_business_{business.id}"
     owner = User(email=body.owner_email, full_name=body.owner_name.strip(), password_hash=hash_password(body.owner_password), role="business_owner", business_id=business.id)
     db.add(owner)
+    verification.consumed_at = datetime.utcnow()
     db.add(Category(name="General", is_grocery=business_type == "grocery", business_id=business.id))
     db.add(Supplier(name="Default Supplier", email=body.owner_email, business_id=business.id))
     db.flush()
     audit(db, actor, "create", "business", business.id, {"name": business.name, "business_type": business.business_type, "master_database_name": business.master_database_name, "local_database_name": business.local_database_name, "owner_email": business.owner_email})
     db.commit()
     return {"id": business.id, "name": business.name, "business_type": business.business_type, "master_database_name": business.master_database_name, "local_database_name": business.local_database_name, "owner_email": business.owner_email, "is_active": business.is_active, "created_at": business.created_at, "accounts": 1, "products": 0, "sales": 0}
+
+
+@api.post("/admin/businesses/owner-email-code", tags=["administrator"])
+def send_owner_email_code(body: OwnerEmailCodeRequest, db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
+    from ..config import get_settings
+    settings = get_settings()
+    if not all((settings.smtp_host, settings.smtp_username, settings.smtp_password, settings.smtp_from_email)):
+        raise HTTPException(503, "Owner email verification is not configured. Set SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD, and SMTP_FROM_EMAIL.")
+    email = str(body.email).strip().lower()
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    db.query(OwnerEmailVerification).filter(
+        func.lower(OwnerEmailVerification.email) == email,
+        OwnerEmailVerification.consumed_at.is_(None),
+    ).update({OwnerEmailVerification.consumed_at: datetime.utcnow()}, synchronize_session=False)
+    db.add(OwnerEmailVerification(email=email, code_hash=owner_code_hash(code), expires_at=datetime.utcnow() + timedelta(minutes=10)))
+    db.flush()
+    message = EmailMessage()
+    message["Subject"] = "Verify your email for Stockwise AI"
+    message["From"] = settings.smtp_from_email
+    message["To"] = email
+    message.set_content(f"Your verification code is {code}. It expires in 10 minutes.")
+    try:
+        smtp_type = smtplib.SMTP_SSL if settings.smtp_use_ssl else smtplib.SMTP
+        with smtp_type(settings.smtp_host, settings.smtp_port, timeout=15) as server:
+            if not settings.smtp_use_ssl:
+                server.starttls()
+            server.login(settings.smtp_username, settings.smtp_password)
+            server.send_message(message)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(503, "Could not send the verification email. Check SMTP settings and try again.") from exc
+    return {"ok": True, "expires_in_seconds": 600}
+
+
+@api.post("/admin/businesses/verify-owner-email", tags=["administrator"])
+@limiter.limit("5/minute")
+def verify_owner_email_code(request: Request, body: OwnerEmailCodeVerify, db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
+    verification = db.query(OwnerEmailVerification).filter(
+        func.lower(OwnerEmailVerification.email) == str(body.email).strip().lower(),
+        OwnerEmailVerification.code_hash == owner_code_hash(body.code),
+        OwnerEmailVerification.verified_at.is_(None), OwnerEmailVerification.consumed_at.is_(None),
+        OwnerEmailVerification.expires_at > datetime.utcnow(),
+    ).order_by(OwnerEmailVerification.id.desc()).with_for_update().first()
+    if not verification:
+        raise HTTPException(400, "That verification code is invalid or expired")
+    verification.verified_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True}
 
 
 @api.put("/admin/businesses/{business_id}", tags=["administrator"])
@@ -541,7 +632,7 @@ def delete_admin_account(user_id: int, db: Session = Depends(get_db), actor: Use
         if active_admins <= 1:
             raise HTTPException(409, "The last active administrator cannot be deleted")
 
-    from sqlalchemy import Integer, inspect as sa_inspect
+    from sqlalchemy import Integer, bindparam, inspect as sa_inspect
     from ..database_manager import get_local_session
 
     # Local operational records are shared workspace history. Detach the account
@@ -552,6 +643,13 @@ def delete_admin_account(user_id: int, db: Session = Depends(get_db), actor: Use
     # configured database; scan it once to avoid duplicate concurrent updates.
     if engine.url.database in {"postgres", "inventory_system"} and local_names:
         local_names = {engine.url.database}
+    elif engine.dialect.name == "postgresql" and local_names:
+        # Old business rows can outlive a tenant database. They have no local
+        # records to clean up, so only open physical databases that still exist.
+        local_names = {
+            name for name in local_names
+            if db.execute(text("SELECT 1 FROM pg_database WHERE datname = :name"), {"name": name}).first()
+        }
     local_refs = {
         "audit_logs": ("user_id",),
         "purchase_orders": ("created_by",),
@@ -570,7 +668,8 @@ def delete_admin_account(user_id: int, db: Session = Depends(get_db), actor: Use
 
     try:
         for database_name in sorted(local_names):
-            local_db = get_local_session(database_name)
+            # Cleanup must not run tenant schema migrations as a side effect.
+            local_db = get_local_session(database_name, ensure_schema=False)
             local_sessions.append(local_db)
             inspector = sa_inspect(local_db.get_bind())
             for table_name, candidates in local_refs.items():
@@ -581,7 +680,9 @@ def delete_admin_account(user_id: int, db: Session = Depends(get_db), actor: Use
                     for log_id, details in local_db.execute(text('SELECT id, "metadata" FROM audit_logs')).all():
                         cleaned = anonymize(details)
                         if cleaned != details:
-                            local_db.execute(text('UPDATE audit_logs SET "metadata" = :details WHERE id = :log_id'), {"details": cleaned, "log_id": log_id})
+                            statement = text('UPDATE audit_logs SET "metadata" = :details WHERE id = :log_id')
+                            statement = statement.bindparams(bindparam("details", type_=columns["metadata"]["type"]))
+                            local_db.execute(statement, {"details": cleaned, "log_id": log_id})
                 for column_name in candidates:
                     column = columns.get(column_name)
                     if not column or not column.get("nullable", True):
@@ -641,6 +742,78 @@ def delete_admin_account(user_id: int, db: Session = Depends(get_db), actor: Use
         for local_db in local_sessions:
             local_db.close()
     return {"ok": True, "deleted_user_id": user_id}
+
+
+@api.delete("/admin/businesses/{business_id}", status_code=200, tags=["administrator"])
+def delete_admin_business(business_id: int, db: Session = Depends(get_db), actor: User = Depends(require_roles("admin"))):
+    business = db.query(Business).filter(Business.id == business_id).with_for_update().first()
+    if not business:
+        raise HTTPException(404, "Business not found")
+    users = db.query(User).filter(User.business_id == business_id).all()
+    user_ids = [user.id for user in users]
+    local_database_name = business.local_database_name
+    try:
+        cleanup_tables = [table for table in Base.metadata.sorted_tables if table.name not in {"businesses", "users"}]
+        primary_keys = {
+            table: next(iter(table.primary_key.columns))
+            for table in cleanup_tables
+            if len(table.primary_key.columns) == 1
+        }
+        scoped_ids = {table: set() for table in primary_keys}
+        for table in cleanup_tables:
+            if table in scoped_ids and "business_id" in table.c:
+                scoped_ids[table].update(db.execute(
+                    select(primary_keys[table]).where(table.c.business_id == business_id)
+                ).scalars())
+
+        # Follow foreign keys from tenant-owned rows to include legacy children
+        # whose business_id was never populated, then delete child-first.
+        changed = True
+        while changed:
+            changed = False
+            for table in cleanup_tables:
+                primary_key = primary_keys.get(table)
+                if primary_key is None:
+                    continue
+                for foreign_key in table.foreign_keys:
+                    parent_ids = scoped_ids.get(foreign_key.column.table)
+                    if not parent_ids:
+                        continue
+                    child_ids = set(db.execute(
+                        select(primary_key).where(foreign_key.parent.in_(parent_ids))
+                    ).scalars())
+                    if not child_ids.issubset(scoped_ids[table]):
+                        scoped_ids[table].update(child_ids)
+                        changed = True
+
+        for table in reversed(cleanup_tables):
+            if scoped_ids.get(table):
+                db.execute(table.delete().where(primary_keys[table].in_(scoped_ids[table])))
+        if user_ids:
+            db.query(AuthSession).filter(AuthSession.user_id.in_(user_ids)).delete(synchronize_session=False)
+            db.query(UserPermission).filter(UserPermission.user_id.in_(user_ids)).delete(synchronize_session=False)
+            db.query(UserPermission).filter(UserPermission.granted_by.in_(user_ids)).update({UserPermission.granted_by: None}, synchronize_session=False)
+            db.query(ChatbotConversation).filter(ChatbotConversation.user_id.in_(user_ids)).delete(synchronize_session=False)
+            db.query(AuditLog).filter(AuditLog.user_id.in_(user_ids)).update({AuditLog.user_id: None}, synchronize_session=False)
+            db.query(InventoryTransaction).filter(InventoryTransaction.user_id.in_(user_ids)).update({InventoryTransaction.user_id: None}, synchronize_session=False)
+            db.query(PurchaseOrder).filter(PurchaseOrder.created_by.in_(user_ids)).update({PurchaseOrder.created_by: None}, synchronize_session=False)
+            db.query(User).filter(User.id.in_(user_ids)).delete(synchronize_session=False)
+        audit(db, actor, "delete", "business", business.id, {"name": business.name, "business_type": business.business_type})
+        db.delete(business)
+        from urllib.parse import urlparse
+        if local_database_name and re.fullmatch(r"local_business_\d+", local_database_name) and urlparse(engine.url.render_as_string(hide_password=True)).path.lstrip("/") not in {"postgres", "inventory_system"}:
+            from ..database_manager import get_engine_for_db
+            tenant_engine = get_engine_for_db(local_database_name, ensure_schema=False)
+            tenant_engine.dispose()
+            postgres_engine = get_engine_for_db("postgres")
+            with postgres_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+                connection.execute(text(f'DROP DATABASE IF EXISTS "{local_database_name}" WITH (FORCE)'))
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Could not safely remove business workspace %s", business_id)
+        raise HTTPException(503, "Could not safely remove this business and its associated records") from exc
+    return {"ok": True, "deleted_business_id": business_id}
 
 
 @api.get("/admin/activity", tags=["administrator"])
@@ -875,10 +1048,28 @@ def checkout_products(q: str = Query(default="", max_length=120), db: Session = 
              "weight_stock_g": p.weight_stock_g} for p in products]
 
 
+@api.get("/checkout/customer-history", tags=["checkout"])
+def checkout_customer_history(phone: str = Query(min_length=5, max_length=40), db: Session = Depends(get_db), _: User = Depends(require_permission("sales.view"))):
+    normalized = re.sub(r"\D", "", phone)
+    if len(normalized) < 5:
+        raise HTTPException(422, "Enter a valid customer phone number")
+    transactions = db.query(CheckoutTransaction).filter(
+        func.regexp_replace(CheckoutTransaction.customer_phone, r"\D", "", "g") == normalized
+    ).order_by(CheckoutTransaction.created_at.desc()).limit(10).all()
+    return [{"invoice_id": transaction.invoice_id, "customer_name": transaction.customer_name,
+             "created_at": transaction.created_at, "total": float(transaction.total),
+             "items": [{"name": item.product_name, "quantity": item.quantity, "total": float(item.line_total)} for item in transaction.items]} for transaction in transactions]
+
+
 def checkout_data(transaction: CheckoutTransaction) -> dict:
     return {"invoice_id": transaction.invoice_id,
-            "customer": {"name": transaction.customer_name, "phone": transaction.customer_phone, "customer_id": transaction.customer_id},
-            "items": [{"product_id": i.product_id, "name": i.product_name, "quantity": i.quantity,
+            "customer": {"name": transaction.customer_name, "phone": transaction.customer_phone, "customer_id": transaction.customer_id,
+                         "prescribed_by": transaction.customer_prescribed_by, "address": transaction.customer_address},
+            "business": {"name": transaction.business.name if transaction.business else "Stockwise AI",
+                         "address": transaction.business.address if transaction.business else None,
+                         "phone": transaction.business.phone if transaction.business else None,
+                         "email": None},
+            "items": [{"product_id": i.product_id, "name": i.product_name, "sku": i.product_sku, "quantity": i.quantity,
                        "unit_price": float(i.unit_price), "total": float(i.line_total), "selected_weight_g": i.selected_weight_g,
                        "weight_unit": i.weight_unit} for i in transaction.items],
             "subtotal": float(transaction.subtotal), "discount": float(transaction.discount), "tax": float(transaction.tax),
@@ -930,12 +1121,18 @@ def complete_checkout(body: CheckoutInput, db: Session = Depends(get_db), user: 
             products[product_id] = product
 
         line_totals: dict[int, Decimal] = {}
+        overridden_prices: dict[int, Decimal] = {}
         for product_id, quantity in quantities.items():
             product = products[product_id]
+            matching_line = next(item for item in body.items if item.product_id == product_id)
+            if matching_line.unit_price is not None and user.role not in {"admin", "business_owner"}:
+                raise HTTPException(403, "Only a business owner can edit selling prices")
+            price = Decimal(str(matching_line.unit_price if matching_line.unit_price is not None else product.price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            overridden_prices[product_id] = price
             if product_id in selected_weights:
-                raw = Decimal(str(product.price)) * Decimal(selected_weights[product_id]) / Decimal(1000)
+                raw = price * Decimal(selected_weights[product_id]) / Decimal(1000)
             else:
-                raw = Decimal(str(product.price)) * quantity
+                raw = price * quantity
             line_totals[product_id] = raw.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         subtotal_decimal = sum(line_totals.values(), Decimal("0.00"))
         discount_decimal = Decimal(str(body.discount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -967,6 +1164,7 @@ def complete_checkout(body: CheckoutInput, db: Session = Depends(get_db), user: 
 
         transaction = CheckoutTransaction(invoice_id=f"PENDING-{uuid.uuid4().hex}", customer_name=body.customer_name.strip() or "Walk-in Customer",
                     customer_phone=body.customer_phone, customer_id=body.customer_id, subtotal=float(subtotal_decimal),
+                    customer_prescribed_by=body.customer_prescribed_by, customer_address=body.customer_address,
                     discount=float(discount_decimal), tax=float(tax_decimal), total=total, payment_method=body.payment_method, payment_status="PAID")
         db.add(transaction)
         db.flush()
@@ -977,10 +1175,10 @@ def complete_checkout(body: CheckoutInput, db: Session = Depends(get_db), user: 
             weighted = product_id in selected_weights
             sale_quantity = 1 if weighted else quantity
             discount_ratio = float(discount_decimal / subtotal_decimal) if subtotal_decimal else 0
-            db.add(CheckoutItem(transaction_id=transaction.id, product_id=product_id, product_name=product.name,
-                                quantity=sale_quantity, unit_price=product.price, line_total=line_total,
+            db.add(CheckoutItem(transaction_id=transaction.id, product_id=product_id, product_name=product.name, product_sku=product.sku,
+                                quantity=sale_quantity, unit_price=float(overridden_prices[product_id]), line_total=line_total,
                                 selected_weight_g=selected_weights.get(product_id), weight_unit=selected_units.get(product_id)))
-            db.add(Sale(date=date.today(), product_id=product_id, quantity_sold=sale_quantity, unit_price=product.price,
+            db.add(Sale(date=date.today(), product_id=product_id, quantity_sold=sale_quantity, unit_price=float(overridden_prices[product_id]),
                         discount=discount_ratio, revenue=round(line_total * (1 - discount_ratio), 2),
                         channel="store", location="Main Store"))
             db.add(InventoryTransaction(product_id=product_id, quantity_delta=0 if weighted else -quantity,

@@ -40,7 +40,7 @@ _ENGINES: Dict[str, Engine] = {}
 _SESSION_MAKERS: Dict[str, sessionmaker] = {}
 _ENSURED_TENANT_SCHEMAS: set = set()
 
-def get_engine_for_db(dbname: str) -> Engine:
+def get_engine_for_db(dbname: str, *, ensure_schema: bool = True) -> Engine:
     """Get or create a pooled SQLAlchemy engine for a specific database."""
     safe_dbname = re.sub(r'[^a-zA-Z0-9_-]', '', dbname)
     if safe_dbname not in _ENGINES:
@@ -58,7 +58,7 @@ def get_engine_for_db(dbname: str) -> Engine:
             autoflush=False,
             bind=_ENGINES[safe_dbname]
         )
-    if safe_dbname.startswith("local_business_") and safe_dbname not in _ENSURED_TENANT_SCHEMAS:
+    if ensure_schema and safe_dbname.startswith("local_business_") and safe_dbname not in _ENSURED_TENANT_SCHEMAS:
         try:
             with _ENGINES[safe_dbname].connect() as conn:
                 conn.execute(text("ALTER TABLE reorder_list ADD COLUMN IF NOT EXISTS reason TEXT;"))
@@ -88,9 +88,9 @@ def get_engine_for_db(dbname: str) -> Engine:
             pass
     return _ENGINES[safe_dbname]
 
-def get_session_for_db(dbname: str) -> Session:
+def get_session_for_db(dbname: str, *, ensure_schema: bool = True) -> Session:
     """Create a new SQLAlchemy session for a specific database."""
-    get_engine_for_db(dbname)
+    get_engine_for_db(dbname, ensure_schema=ensure_schema)
     return _SESSION_MAKERS[dbname]()
 
 def get_admin_session() -> Session:
@@ -113,12 +113,12 @@ def get_master_session(business_type: str) -> Session:
         safe_type = "restaurant"
     return get_session_for_db(f"master_{safe_type}")
 
-def get_local_session(local_database_name: str) -> Session:
+def get_local_session(local_database_name: str, *, ensure_schema: bool = True) -> Session:
     parsed = urlparse(settings.database_url)
     target = parsed.path.lstrip("/")
     if target in ("inventory_system", "postgres"):
-        return get_session_for_db(target)
-    return get_session_for_db(local_database_name)
+        return get_session_for_db(target, ensure_schema=ensure_schema)
+    return get_session_for_db(local_database_name, ensure_schema=ensure_schema)
 
 # DDL for newly provisioned local business databases
 LOCAL_DB_DDL = """

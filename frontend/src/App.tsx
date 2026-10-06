@@ -48,6 +48,12 @@ function App() {
   }, [])
 
   useEffect(() => {
+    const onSessionExpired = () => setUser(null)
+    window.addEventListener('session-expired', onSessionExpired)
+    return () => window.removeEventListener('session-expired', onSessionExpired)
+  }, [])
+
+  useEffect(() => {
     // Real-time cookie session authentication check on startup
     api<User>('/api/auth/me')
       .then(setUser)
@@ -78,7 +84,7 @@ function App() {
   else if (activePage === 'admin' && user.role === 'admin') view = <AdminPage currentUser={user}/>
   else if (activePage === 'data-input') view = <DataInputPage/>
   else if (activePage === 'products') view = <ProductsPage/>
-  else if (activePage === 'checkout') view = <CheckoutPage/>
+  else if (activePage === 'checkout') view = <CheckoutPage currentUser={user}/>
   else if (activePage === 'reorders') view = <ReorderPage currentUser={user}/>
   else if (activePage === 'receipts') view = <ReceiptsPage currentUser={user}/>
   else if (activePage === 'chat') view = <ChatPage/>

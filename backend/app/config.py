@@ -17,6 +17,12 @@ class Settings(BaseSettings):
     llm_api_key: str | None = None
     llm_model: str = "Llama-V3p2-3b-Reasoning"
     llm_base_url: str = "https://api.nugen.in/api/v3"
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_from_email: str | None = None
+    smtp_use_ssl: bool = False
     skip_alembic_startup: bool = True
     model_config = SettingsConfigDict(env_file=PROJECT_ROOT / ".env", extra="ignore")
 

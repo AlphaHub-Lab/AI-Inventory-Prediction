@@ -60,6 +60,7 @@ async def http_error(_: Request, exc: HTTPException):
 
 
 @app.get("/health", tags=["system"])
+@app.get("/api/health", tags=["system"])
 def health():
     return {
         "status": "ok",
