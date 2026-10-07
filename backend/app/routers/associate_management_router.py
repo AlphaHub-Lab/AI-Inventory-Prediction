@@ -8,7 +8,7 @@ Allows:
 - Enabling/disabling associate accounts
 """
 
-from typing import List, Optional
+from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import text
@@ -144,7 +144,7 @@ def create_associate(
 
 @router.put("/{associate_id}/permissions")
 def update_associate_permissions(
-    associate_id: int,
+    associate_id: Any,
     body: AssociatePermissionsUpdate,
     user: User = Depends(require_roles("business_owner", "admin")),
     admin_db: Session = Depends(get_admin_db)
@@ -186,7 +186,7 @@ def update_associate_permissions(
 
 @router.put("/{associate_id}/status")
 def toggle_associate_status(
-    associate_id: int,
+    associate_id: Any,
     body: AssociateStatusUpdate,
     user: User = Depends(require_roles("business_owner", "admin")),
     admin_db: Session = Depends(get_admin_db)

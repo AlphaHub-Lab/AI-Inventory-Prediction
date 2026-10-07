@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta
+from typing import Any
 from io import StringIO
 import csv
 import logging
@@ -261,7 +262,7 @@ ASSOCIATE_PERMISSIONS = {
 
 
 @api.put("/users/{user_id}/permissions", tags=["users"])
-def set_associate_permissions(user_id: int, body: PermissionUpdate, db: Session = Depends(get_db), owner: User = Depends(require_roles("business_owner"))):
+def set_associate_permissions(user_id: Any, body: PermissionUpdate, db: Session = Depends(get_db), owner: User = Depends(require_roles("business_owner"))):
     target = db.query(User).filter(User.id == user_id, User.business_id == owner.business_id, User.role == "associate").first()
     if not target:
         raise HTTPException(404, "Associate not found in your business")
@@ -277,7 +278,7 @@ def set_associate_permissions(user_id: int, body: PermissionUpdate, db: Session 
 
 
 @api.put("/admin/users/{user_id}", tags=["administrator"])
-def update_admin_user(user_id: int, body: AdminUserUpdate, db: Session = Depends(get_db), actor: User = Depends(require_roles("admin"))):
+def update_admin_user(user_id: Any, body: AdminUserUpdate, db: Session = Depends(get_db), actor: User = Depends(require_roles("admin"))):
     target = db.get(User, user_id)
     if not target:
         raise HTTPException(404, "User not found")
@@ -370,7 +371,7 @@ def admin_overview(db: Session = Depends(get_db), _: User = Depends(require_role
 def admin_dashboard(
     start: date | None = None,
     end: date | None = None,
-    business_id: int | None = None,
+    business_id: Any = None,
     category: str | None = None,
     db: Session = Depends(get_db),
     _: User = Depends(require_roles("admin")),
@@ -567,7 +568,7 @@ def verify_owner_email_code(request: Request, body: OwnerEmailCodeVerify, db: Se
 
 
 @api.put("/admin/businesses/{business_id}", tags=["administrator"])
-def update_business_status(business_id: int, body: BusinessStatusUpdate, db: Session = Depends(get_db), actor: User = Depends(require_roles("admin"))):
+def update_business_status(business_id: Any, body: BusinessStatusUpdate, db: Session = Depends(get_db), actor: User = Depends(require_roles("admin"))):
     business = db.get(Business, business_id)
     if not business:
         raise HTTPException(404, "Business not found")
@@ -620,7 +621,7 @@ def admin_accounts(db: Session = Depends(get_db), _: User = Depends(require_role
 
 
 @api.delete("/admin/accounts/{user_id}", tags=["administrator"])
-def delete_admin_account(user_id: int, db: Session = Depends(get_db), actor: User = Depends(require_roles("admin"))):
+def delete_admin_account(user_id: Any, db: Session = Depends(get_db), actor: User = Depends(require_roles("admin"))):
     """Permanently remove an account and its personal authentication/assistant data."""
     target = db.query(User).filter(User.id == user_id).with_for_update().first()
     if not target:
@@ -745,7 +746,7 @@ def delete_admin_account(user_id: int, db: Session = Depends(get_db), actor: Use
 
 
 @api.delete("/admin/businesses/{business_id}", status_code=200, tags=["administrator"])
-def delete_admin_business(business_id: int, db: Session = Depends(get_db), actor: User = Depends(require_roles("admin"))):
+def delete_admin_business(business_id: Any, db: Session = Depends(get_db), actor: User = Depends(require_roles("admin"))):
     business = db.query(Business).filter(Business.id == business_id).with_for_update().first()
     if not business:
         raise HTTPException(404, "Business not found")
