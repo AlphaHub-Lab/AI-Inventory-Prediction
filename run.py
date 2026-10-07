@@ -50,16 +50,13 @@ def check_db_connection():
         if not db_url:
             return False
 
-        cmd = [
-            PYTHON_EXE, "-c",
-            "import sys; from sqlalchemy import create_engine, text; "
-            "engine = create_engine(sys.argv[1]); "
-            "conn = engine.connect(); conn.execute(text('SELECT 1')); conn.close(); print('OK')",
-            db_url
-        ]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
-        return "OK" in res.stdout
-    except Exception:
+        from sqlalchemy import create_engine, text
+        engine = create_engine(db_url, connect_args={"connect_timeout": 10})
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True
+    except Exception as exc:
+        print(f"    [!] Database check notice: {exc}")
         return False
 
 def ensure_postgres():
