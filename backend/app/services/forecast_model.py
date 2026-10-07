@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 from functools import lru_cache
 import os
 from pathlib import Path
 from datetime import date
 import math
+from typing import Any
 
 try:
     import joblib
@@ -47,7 +50,7 @@ def feature_row(
     price: float,
     target_date: date,
     history: list[float],
-) -> np.ndarray | None:
+) -> Any | None:
     if np is None or len(history) < 28:
         return None
     angle = 2 * math.pi * (target_date.timetuple().tm_yday - 1) / 365.25
