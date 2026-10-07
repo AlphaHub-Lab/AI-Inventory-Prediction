@@ -9,15 +9,25 @@ settings = get_settings()
 
 
 def _sqlalchemy_database_url(value: str) -> str:
-    """Use the installed psycopg 3 driver for standard PostgreSQL URLs."""
+    """Use the installed psycopg 3 driver for standard PostgreSQL URLs and enforce SSL for Supabase."""
     if value.startswith("postgresql://"):
-        return value.replace("postgresql://", "postgresql+psycopg://", 1)
-    if value.startswith("postgresql+psycopg2://"):
-        return value.replace("postgresql+psycopg2://", "postgresql+psycopg://", 1)
+        value = value.replace("postgresql://", "postgresql+psycopg://", 1)
+    elif value.startswith("postgresql+psycopg2://"):
+        value = value.replace("postgresql+psycopg2://", "postgresql+psycopg://", 1)
+    if ("supabase.co" in value or "pooler.supabase.com" in value) and "sslmode=" not in value:
+        separator = "&" if "?" in value else "?"
+        value = f"{value}{separator}sslmode=require"
     return value
 
 
-engine = create_engine(_sqlalchemy_database_url(settings.database_url), pool_pre_ping=True, pool_recycle=300, pool_size=10, max_overflow=20, connect_args={"connect_timeout": 15})
+engine = create_engine(
+    _sqlalchemy_database_url(settings.database_url),
+    pool_pre_ping=True,
+    pool_recycle=300,
+    pool_size=5,
+    max_overflow=10,
+    connect_args={"connect_timeout": 5}
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 

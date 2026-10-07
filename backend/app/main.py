@@ -26,18 +26,20 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    if not (os.getenv("SKIP_ALEMBIC_STARTUP") == "1" or settings.skip_alembic_startup or "inventory_system" in settings.database_url):
+    # In serverless environments like Vercel, avoid long-running migrations and seeding during cold start
+    is_serverless = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
+    if not is_serverless and not (os.getenv("SKIP_ALEMBIC_STARTUP") == "1" or settings.skip_alembic_startup or "inventory_system" in settings.database_url):
         try:
             config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
             command.upgrade(config, "head")
         except Exception as e:
             print(f"Warning on startup migration: {e}")
-    try:
-        from .seed import seed
-        seed()
-    except Exception as e:
-        print(f"Warning on startup database seeding: {e}")
+    if not is_serverless and not (os.getenv("SKIP_SEEDING_STARTUP") == "1"):
+        try:
+            from .seed import seed
+            seed()
+        except Exception as e:
+            print(f"Warning on startup database seeding: {e}")
     yield
     # Shutdown
 
@@ -71,7 +73,16 @@ async def http_error(_: Request, exc: HTTPException):
 async def unhandled_exception_handler(_: Request, exc: Exception):
     err_str = str(exc)
     err_lower = err_str.lower()
-    if any(k in err_lower for k in ["connection refused", "could not translate host name", "operationalerror", "connection to server at", "password authentication failed", "ssl connection", "relation does not exist", "undefinedtable"]):
+    exc_type = type(exc).__name__.lower()
+    if (
+        "operationalerror" in exc_type
+        or "timeout" in err_lower
+        or any(k in err_lower for k in [
+            "connection refused", "could not translate host name", "operationalerror",
+            "connection to server at", "password authentication failed", "ssl connection",
+            "relation does not exist", "undefinedtable", "timeout", "timed out"
+        ])
+    ):
         return JSONResponse(
             status_code=503,
             content={"error": {"message": "Database error: Unable to connect or initialize. Please check your DATABASE_URL in Vercel Project Settings.", "status": 503}}

@@ -85,12 +85,19 @@ export async function apiResponse(path: string, init: RequestInit = {}): Promise
     } catch {
       payload = null
     }
-    const message =
+    let message =
       payload?.error?.message ||
       (typeof payload?.error === 'string' ? payload.error : null) ||
       payload?.detail ||
-      payload?.message ||
-      (text && !text.includes('<html') && text.length < 250 ? text : null)
+      payload?.message
+
+    if (!message && text) {
+      if (text.includes('FUNCTION_INVOCATION_FAILED')) {
+        message = 'Serverless backend failed to start. Please verify DATABASE_URL and SECRET_KEY are configured in your Vercel Project Settings (Settings > Environment Variables).'
+      } else if (!text.includes('<html') && text.length < 250) {
+        message = text
+      }
+    }
 
     const fallback =
       response.status === 429
