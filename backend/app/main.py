@@ -55,6 +55,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -93,15 +94,24 @@ async def unhandled_exception_handler(_: Request, exc: Exception):
     )
 
 
+@app.get("/ping", tags=["system"])
+@app.get("/api/ping", tags=["system"])
+def ping():
+    return {"status": "ok", "service": settings.app_name, "environment": settings.environment}
+
+
 @app.get("/health", tags=["system"])
 @app.get("/api/health", tags=["system"])
 def health():
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
+        return {"status": "ok", "service": settings.app_name, "database": "connected"}
     except Exception as exc:
-        raise HTTPException(status_code=503, detail="Database unavailable") from exc
-    return {"status": "ok", "service": settings.app_name}
+        return JSONResponse(
+            status_code=503,
+            content={"status": "degraded", "error": "Database unavailable", "detail": str(exc)}
+        )
 
 
 @app.post("/desktop/shutdown", tags=["system"], include_in_schema=False)
