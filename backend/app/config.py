@@ -38,6 +38,19 @@ class Settings(BaseSettings):
         return value
 
     @model_validator(mode="after")
+    def resolve_supabase_database_url(self):
+        # If DATABASE_URL is localhost default, but SUPABASE_URL is provided (e.g. on Vercel):
+        if ("localhost" in self.database_url or "127.0.0.1" in self.database_url) and self.supabase_url:
+            ref = self.supabase_url.replace("https://", "").replace("http://", "").split(".")[0].strip()
+            if ref:
+                import os
+                db_pwd = os.getenv("SUPABASE_DB_PASSWORD", "InventoryDatabase123")
+                db_name = os.getenv("ADMIN_DB_NAME", "admin_db")
+                pooler_host = os.getenv("SUPABASE_POOLER_HOST", "aws-0-ap-southeast-2.pooler.supabase.com")
+                self.database_url = f"postgresql+psycopg://postgres.{ref}:{db_pwd}@{pooler_host}:5432/{db_name}?sslmode=require"
+        return self
+
+    @model_validator(mode="after")
     def require_production_secret(self):
         if len(self.secret_key) < 32 or self.secret_key in {"change-this-before-production", "replace-with-a-long-random-secret"}:
             import warnings, secrets

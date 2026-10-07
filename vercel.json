@@ -25,6 +25,12 @@
       }
     },
     {
+      "source": "/ping",
+      "destination": {
+        "service": "backend"
+      }
+    },
+    {
       "source": "/docs",
       "destination": {
         "service": "backend"
