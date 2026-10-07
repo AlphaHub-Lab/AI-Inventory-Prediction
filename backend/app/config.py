@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     smtp_from_email: str | None = None
     smtp_use_ssl: bool = False
     skip_alembic_startup: bool = True
+    supabase_url: str | None = None
+    supabase_publishable_key: str | None = None
+    supabase_secret_key: str | None = None
+    supabase_jwks_url: str | None = None
     model_config = SettingsConfigDict(env_file=PROJECT_ROOT / ".env", extra="ignore")
 
     @field_validator("database_url")
