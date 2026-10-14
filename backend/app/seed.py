@@ -1,7 +1,8 @@
-"""Deterministic development data. Run with: python -m app.seed"""
+"""Deterministic development & demo data. Run with: python -m app.seed"""
 from datetime import date, timedelta
 from decimal import Decimal
 import random
+from sqlalchemy.orm import Session
 from .db import Base, SessionLocal, engine
 from .models import Business, Category, KnowledgeChunk, KnowledgeDocument, Product, Role, Sale, Supplier, User
 from .security import hash_password
@@ -35,72 +36,163 @@ POLICIES = {
 }
 
 
-def seed() -> None:
-    Base.metadata.create_all(bind=engine)
-    db = SessionLocal()
-    try:
-        if db.query(Product).count():
-            print("Database already seeded; no changes made.")
-            return
-        randomizer = random.Random(20260907)
-        business = Business(name="Stockwise Demo Business", owner_email="manager@inventory.example.com", business_type="grocery", master_database_name="master_grocery")
+def seed_demo_data(db: Session, force: bool = False) -> dict:
+    """
+    Seed or verify deterministic demo workspace, products, suppliers, categories,
+    and 1 year of daily historical sales data. Safe to run repeatedly.
+    """
+    randomizer = random.Random(20260907)
+    
+    # 1. Ensure at least one business workspace exists
+    business = db.query(Business).first()
+    if not business:
+        business = Business(
+            name="Stockwise Demo Business",
+            owner_email="manager@inventory.example.com",
+            business_type="grocery",
+            master_database_name="master_grocery",
+            local_database_name="local_business_1",
+            owner_phone="+91-9876543210",
+            owner_personal_email="manager@inventory.example.com",
+            phone="+91-9876543210",
+            address="123 Market Street, Suite 400",
+            is_active=True
+        )
         db.add(business)
         db.flush()
         business.local_database_name = f"local_business_{business.id}"
-        db.info["business_id"] = business.id
-        for role in ["admin", "business_owner", "associate"]:
-            db.add(Role(name=role, description=f"{role.title()} application role"))
-        db.add_all([
-            User(email="admin@inventory.example.com", full_name="Avery Admin", password_hash=hash_password("Admin123!"), role="admin"),
-            User(email="manager@inventory.example.com", full_name="Morgan Manager", password_hash=hash_password("Manager123!"), role="business_owner", business_id=business.id),
-            User(email="staff@inventory.example.com", full_name="Sam Staff", password_hash=hash_password("Staff123!"), role="associate", business_id=business.id),
-        ])
-        categories = {name: Category(name=name) for name in CATEGORIES}
-        db.add_all(categories.values())
-        suppliers = []
-        for i, (name, lead, reliability) in enumerate(SUPPLIERS):
-            supplier = Supplier(name=name, email=f"orders{i+1}@supplier.local", phone=f"+91-90000-{1000+i}", lead_time_days=lead, minimum_order_quantity=10, reliability_score=reliability)
-            db.add(supplier)
-            suppliers.append(supplier)
-        db.flush()
-        today = date.today()
-        product_rows = []
-        for index, (name, category, price, stock, reorder, maximum, shelf_life) in enumerate(PRODUCTS, start=1):
+    
+    db.info["business_id"] = business.id
+
+    # 2. Ensure application roles exist
+    for role_name in ["admin", "business_owner", "associate"]:
+        if not db.query(Role).filter_by(name=role_name).first():
+            db.add(Role(name=role_name, description=f"{role_name.replace('_', ' ').title()} application role"))
+
+    # 3. Ensure default test accounts exist
+    users_data = [
+        ("admin@inventory.example.com", "Avery Admin", "Admin123!", "admin", None),
+        ("manager@inventory.example.com", "Morgan Manager", "Manager123!", "business_owner", business.id),
+        ("staff@inventory.example.com", "Sam Staff", "Staff123!", "associate", business.id),
+    ]
+    for email, name, pwd, role, b_id in users_data:
+        if not db.query(User).filter_by(email=email).first():
+            db.add(User(email=email, full_name=name, password_hash=hash_password(pwd), role=role, business_id=b_id, is_active=True))
+
+    # 4. Ensure demo categories exist
+    categories = {}
+    for cat_name in CATEGORIES:
+        cat = db.query(Category).filter_by(name=cat_name, business_id=business.id).first()
+        if not cat:
+            cat = Category(name=cat_name, business_id=business.id, is_grocery=cat_name in ("Dairy", "Produce", "Bakery"))
+            db.add(cat)
+            db.flush()
+        categories[cat_name] = cat
+
+    # 5. Ensure demo suppliers exist
+    suppliers = []
+    for i, (name, lead, reliability) in enumerate(SUPPLIERS):
+        sup = db.query(Supplier).filter_by(name=name, business_id=business.id).first()
+        if not sup:
+            sup = Supplier(name=name, email=f"orders{i+1}@supplier.local", phone=f"+91-90000-{1000+i}", lead_time_days=lead, minimum_order_quantity=10, reliability_score=reliability, business_id=business.id)
+            db.add(sup)
+            db.flush()
+        suppliers.append(sup)
+    db.flush()
+
+    # 6. Check if products already exist in this workspace
+    existing_products_count = db.query(Product).filter_by(business_id=business.id).count()
+    if existing_products_count > 0 and not force:
+        db.commit()
+        return {
+            "ok": True,
+            "message": f"Workspace '{business.name}' already contains {existing_products_count} products and active records.",
+            "business_id": business.id,
+            "business_name": business.name,
+            "products": existing_products_count,
+            "sales": db.query(Sale).filter_by(business_id=business.id).count()
+        }
+
+    # 7. Seed 30 demo products
+    today = date.today()
+    product_rows = []
+    for index, (name, category_name, price, stock, reorder, maximum, shelf_life) in enumerate(PRODUCTS, start=1):
+        product = db.query(Product).filter_by(sku=f"INV-{index:03d}", business_id=business.id).first()
+        if not product:
             product = Product(
-                sku=f"INV-{index:03d}", name=name, category_id=categories[category].id, unit="pack", price=Decimal(str(price)), supplier_id=suppliers[(index - 1) % len(suppliers)].id,
-                manufacturing_date=today - timedelta(days=7), expiry_date=(today + timedelta(days=(index % 13) - 3) if shelf_life and shelf_life < 40 else (today + timedelta(days=shelf_life) if shelf_life else None)),
-                current_stock=stock, minimum_stock=max(1, reorder - 10), maximum_stock=maximum, reorder_point=reorder, safety_stock=max(8, reorder // 3), lead_time_days=suppliers[(index - 1) % len(suppliers)].lead_time_days,
+                sku=f"INV-{index:03d}", name=name, category_id=categories[category_name].id, unit="pack",
+                price=Decimal(str(price)), supplier_id=suppliers[(index - 1) % len(suppliers)].id, business_id=business.id,
+                manufacturing_date=today - timedelta(days=7),
+                expiry_date=(today + timedelta(days=(index % 13) - 3) if shelf_life and shelf_life < 40 else (today + timedelta(days=shelf_life) if shelf_life else None)),
+                current_stock=stock, minimum_stock=max(1, reorder - 10), maximum_stock=maximum, reorder_point=reorder,
+                safety_stock=max(8, reorder // 3), lead_time_days=suppliers[(index - 1) % len(suppliers)].lead_time_days,
+                status="active"
             )
             db.add(product)
             product_rows.append(product)
-        db.flush()
-        # Exactly reproducible daily history across 12 months; small trend, weekday, season and promotion effects.
-        history_start = today - timedelta(days=364)
-        sales: list[Sale] = []
-        for product_index, product in enumerate(product_rows):
-            base = 2 + (product_index % 9)
-            for day_offset in range(365):
-                sale_date = history_start + timedelta(days=day_offset)
-                promo = sale_date.day in (5, 20) and product_index % 3 == 0
-                holiday = sale_date.month == 12 and sale_date.day in (24, 25, 31)
-                season = 1.2 if sale_date.month in (11, 12) and product.category_id in (3, 6) else 1.0
-                weekend = 1.12 if sale_date.weekday() >= 5 else .94
-                trend = 1 + day_offset / 3650
-                quantity = max(1, int(round((base + randomizer.uniform(-1.4, 1.4) + (2 if promo else 0) + (1 if holiday else 0)) * weekend * season * trend)))
-                unit_price = float(product.price)
-                discount = .1 if promo else 0
-                sales.append(Sale(date=sale_date, product_id=product.id, quantity_sold=quantity, unit_price=unit_price, discount=discount, promotion=promo, holiday=holiday, channel="online" if product_index % 4 == 0 else "store", location="Central Store", revenue=round(quantity * unit_price * (1-discount), 2)))
-        db.add_all(sales)
-        for title, body in POLICIES.items():
-            document = KnowledgeDocument(title=title, body=body)
+    db.flush()
+
+    # 8. Seed exactly reproducible daily sales history across 365 days
+    history_start = today - timedelta(days=364)
+    sales = []
+    for product_index, product in enumerate(product_rows):
+        base = 2 + (product_index % 9)
+        for day_offset in range(365):
+            sale_date = history_start + timedelta(days=day_offset)
+            promo = sale_date.day in (5, 20) and product_index % 3 == 0
+            holiday = sale_date.month == 12 and sale_date.day in (24, 25, 31)
+            season = 1.2 if sale_date.month in (11, 12) and product.category_id in (3, 6) else 1.0
+            weekend = 1.12 if sale_date.weekday() >= 5 else .94
+            trend = 1 + day_offset / 3650
+            quantity = max(1, int(round((base + randomizer.uniform(-1.4, 1.4) + (2 if promo else 0) + (1 if holiday else 0)) * weekend * season * trend)))
+            unit_price = float(product.price)
+            discount = .1 if promo else 0
+            sales.append(Sale(
+                business_id=business.id, date=sale_date, product_id=product.id, quantity_sold=quantity,
+                unit_price=unit_price, discount=discount, promotion=promo, holiday=holiday,
+                channel="online" if product_index % 4 == 0 else "store", location="Central Store",
+                revenue=round(quantity * unit_price * (1-discount), 2)
+            ))
+    db.add_all(sales)
+
+    # 9. Knowledge documents & policy chunks
+    for title, body in POLICIES.items():
+        if not db.query(KnowledgeDocument).filter_by(title=title, business_id=business.id).first():
+            document = KnowledgeDocument(title=title, body=body, business_id=business.id)
             db.add(document)
             db.flush()
-            db.add(KnowledgeChunk(document_id=document.id, content=body, metadata_json={"section": title}))
-        db.commit()
-        for product in product_rows:
+            db.add(KnowledgeChunk(document_id=document.id, content=body, metadata_json={"section": title}, business_id=business.id))
+
+    db.commit()
+
+    # 10. Generate baseline forecasts and operational insights
+    for product in product_rows:
+        try:
             forecast_product(db, product, 30)
+        except Exception:
+            pass
+    try:
         refresh_operational_insights(db)
-        print(f"Seeded {len(product_rows)} products and {len(sales)} sales rows.")
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "message": f"Successfully seeded {len(product_rows)} products and {len(sales)} sales transactions in workspace '{business.name}'.",
+        "business_id": business.id,
+        "business_name": business.name,
+        "products": len(product_rows),
+        "sales": len(sales)
+    }
+
+
+def seed() -> None:
+    from .schema_migration import ensure_schema_compatibility
+    ensure_schema_compatibility(engine)
+    db = SessionLocal()
+    try:
+        res = seed_demo_data(db)
+        print(res.get("message", "Seeding completed."))
     finally:
         db.close()
 

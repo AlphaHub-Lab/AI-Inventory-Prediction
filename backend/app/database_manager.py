@@ -91,6 +91,21 @@ def get_engine_for_db(dbname: str, *, ensure_schema: bool = True) -> Engine:
             pass
     return _ENGINES[safe_dbname]
 
+def is_single_database_mode() -> bool:
+    """True if using single-database mode (Vercel, Supabase, Neon, or unified database)."""
+    if os.getenv("SINGLE_DATABASE_MODE", "").lower() in ("1", "true", "yes"):
+        return True
+    if bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME")):
+        return True
+    raw_url = settings.database_url.lower()
+    if "pooler.supabase.com" in raw_url or "supabase.co" in raw_url or "neon.tech" in raw_url:
+        return True
+    parsed = urlparse(settings.database_url)
+    target = parsed.path.lstrip("/")
+    if target in ("inventory_system", "postgres", "admin_db", "neondb", "defaultdb"):
+        return True
+    return False
+
 def get_session_for_db(dbname: str, *, ensure_schema: bool = True) -> Session:
     """Create a new SQLAlchemy session for a specific database."""
     get_engine_for_db(dbname, ensure_schema=ensure_schema)
@@ -99,29 +114,33 @@ def get_session_for_db(dbname: str, *, ensure_schema: bool = True) -> Session:
 def get_admin_session() -> Session:
     parsed = urlparse(settings.database_url)
     target = parsed.path.lstrip("/")
-    # DATABASE_URL names the central app database in this physical-DB setup.
-    # Preserve that name (normally admin_db) unless explicitly overridden.
     dbname = os.getenv("ADMIN_DB_NAME") or target or "admin_db"
     return get_session_for_db(dbname)
 
 def get_master_session(business_type: str) -> Session:
     parsed = urlparse(settings.database_url)
-    target = parsed.path.lstrip("/")
-    if target in ("inventory_system", "postgres"):
+    target = parsed.path.lstrip("/") or "admin_db"
+    if is_single_database_mode():
         return get_session_for_db(target)
     safe_type = business_type.lower().strip()
     if safe_type not in ["medical", "grocery", "restaurant", "food", "stationery", "dairy"]:
         safe_type = "grocery"
     elif safe_type == "food":
         safe_type = "restaurant"
-    return get_session_for_db(f"master_{safe_type}")
+    try:
+        return get_session_for_db(f"master_{safe_type}")
+    except Exception:
+        return get_session_for_db(target)
 
 def get_local_session(local_database_name: str, *, ensure_schema: bool = True) -> Session:
     parsed = urlparse(settings.database_url)
-    target = parsed.path.lstrip("/")
-    if target in ("inventory_system", "postgres"):
+    target = parsed.path.lstrip("/") or "admin_db"
+    if is_single_database_mode():
         return get_session_for_db(target, ensure_schema=ensure_schema)
-    return get_session_for_db(local_database_name, ensure_schema=ensure_schema)
+    try:
+        return get_session_for_db(local_database_name, ensure_schema=ensure_schema)
+    except Exception:
+        return get_session_for_db(target, ensure_schema=ensure_schema)
 
 # DDL for newly provisioned local business databases
 LOCAL_DB_DDL = """
@@ -453,44 +472,70 @@ def provision_new_business_database(
     owner_email: str
 ) -> str:
     """
-    Creates a new physical PostgreSQL database local_business_<business_id> on Supabase cluster,
-    executes full schema provisioning, seeds default supplier and profile, and returns the dbname.
+    Creates and provisions tenant local schema. On unified / cloud PostgreSQL (Supabase, Neon, Vercel),
+    provisions local tables directly within the primary database. On dedicated PostgreSQL clusters,
+    creates physical database local_business_<id> with automatic fallback.
     """
-    import psycopg
-
     local_dbname = f"local_business_{business_id}"
     parsed = urlparse(settings.database_url)
-    target = parsed.path.lstrip("/")
-    if target in ("inventory_system", "postgres"):
-        # In unified database architectures (e.g. Supabase postgres), all local tables exist directly
+    target = parsed.path.lstrip("/") or "admin_db"
+
+    # In unified/single database mode, initialize directly on target database engine
+    if is_single_database_mode():
+        try:
+            with get_engine_for_db(target).connect() as conn:
+                conn.execute(text(LOCAL_DB_DDL))
+                conn.execute(text("""
+                    INSERT INTO business_profile (name, business_type, owner_email)
+                    VALUES (:name, :b_type, :email)
+                    ON CONFLICT DO NOTHING;
+                """), {"name": business_name, "b_type": business_type, "email": owner_email})
+                conn.execute(text("""
+                    INSERT INTO suppliers (name, contact_person, email, phone)
+                    VALUES ('Primary Supplier', 'Accounts Department', :email, '+91 9000000000')
+                    ON CONFLICT (name) DO NOTHING;
+                """), {"email": owner_email})
+                conn.execute(text("""
+                    INSERT INTO customers (name, phone, email)
+                    VALUES ('Walk-in Customer', '9999999999', 'walkin@store.local')
+                    ON CONFLICT DO NOTHING;
+                """))
+                conn.commit()
+        except Exception as e:
+            print(f"Notice: local table initialization on unified database: {e}")
         return local_dbname
 
-    # 1. Connect to postgres database to execute CREATE DATABASE
-    with psycopg.connect(database_url_for("postgres", sqlalchemy_driver=False), autocommit=True) as conn:
-        if not conn.execute("SELECT 1 FROM pg_database WHERE datname = %s;", (local_dbname,)).fetchone():
-            conn.execute(f'CREATE DATABASE "{local_dbname}";')
+    # Multi-database mode: attempt physical CREATE DATABASE with graceful fallback
+    try:
+        import psycopg
+        with psycopg.connect(database_url_for("postgres", sqlalchemy_driver=False), autocommit=True) as conn:
+            if not conn.execute("SELECT 1 FROM pg_database WHERE datname = %s;", (local_dbname,)).fetchone():
+                conn.execute(f'CREATE DATABASE "{local_dbname}";')
 
-    # 2. Connect to the newly created local database and apply full DDL
-    with psycopg.connect(database_url_for(local_dbname, sqlalchemy_driver=False), autocommit=True) as local_conn:
-        local_conn.execute(LOCAL_DB_DDL)
-
-        # 3. Insert Business Profile & Default Supplier
-        local_conn.execute("""
-            INSERT INTO business_profile (name, business_type, owner_email)
-            VALUES (%s, %s, %s)
-            ON CONFLICT DO NOTHING;
-        """, (business_name, business_type, owner_email))
-
-        local_conn.execute("""
-            INSERT INTO suppliers (name, contact_person, email, phone)
-            VALUES ('Primary Supplier', 'Accounts Department', %s, '+91 9000000000')
-            ON CONFLICT (name) DO NOTHING;
-        """, (owner_email,))
-
-        local_conn.execute("""
-            INSERT INTO customers (name, phone, email)
-            VALUES ('Walk-in Customer', '9999999999', 'walkin@store.local')
-            ON CONFLICT DO NOTHING;
-        """)
+        with psycopg.connect(database_url_for(local_dbname, sqlalchemy_driver=False), autocommit=True) as local_conn:
+            local_conn.execute(LOCAL_DB_DDL)
+            local_conn.execute("""
+                INSERT INTO business_profile (name, business_type, owner_email)
+                VALUES (%s, %s, %s)
+                ON CONFLICT DO NOTHING;
+            """, (business_name, business_type, owner_email))
+            local_conn.execute("""
+                INSERT INTO suppliers (name, contact_person, email, phone)
+                VALUES ('Primary Supplier', 'Accounts Department', %s, '+91 9000000000')
+                ON CONFLICT (name) DO NOTHING;
+            """, (owner_email,))
+            local_conn.execute("""
+                INSERT INTO customers (name, phone, email)
+                VALUES ('Walk-in Customer', '9999999999', 'walkin@store.local')
+                ON CONFLICT DO NOTHING;
+            """)
+    except Exception as e:
+        print(f"Notice: Separate database creation unavailable ({e}), using unified database fallback.")
+        try:
+            with get_engine_for_db(target).connect() as conn:
+                conn.execute(text(LOCAL_DB_DDL))
+                conn.commit()
+        except Exception as inner_e:
+            print(f"Notice: fallback DDL check: {inner_e}")
 
     return local_dbname

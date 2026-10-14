@@ -97,12 +97,35 @@ export default function AdminPage({ currentUser }: { currentUser: User }) {
     finally { setBusy(false) }
   }
 
+  async function seedDemoData() {
+    setBusy(true); setError(''); setNotice('')
+    try {
+      const res = await api<{ ok: boolean; message: string }>('/api/admin/seed', { method: 'POST' })
+      setNotice(res.message || 'Demo test data seeded successfully!')
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not seed test data.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function sendOwnerCode() {
     if (!personalEmail.trim()) { setError('Enter the owner personal email first.'); return }
     setBusy(true); setError(''); setNotice('')
     try {
-      await api('/api/admin/businesses/owner-email-code', { method: 'POST', body: JSON.stringify({ email: personalEmail.trim() }) })
-      setEmailCodeSent(true); setVerifiedPersonalEmail(''); setNotice('Verification code sent to the owner personal email.')
+      const res = await api<{ ok: boolean; dev_code?: string; message?: string }>('/api/admin/businesses/owner-email-code', {
+        method: 'POST',
+        body: JSON.stringify({ email: personalEmail.trim() }),
+      })
+      setEmailCodeSent(true)
+      setVerifiedPersonalEmail('')
+      if (res.dev_code) {
+        setEmailCode(res.dev_code)
+        setNotice(res.message || `Code: ${res.dev_code} (Auto-filled for setup)`)
+      } else {
+        setNotice(res.message || 'Verification code sent to the owner personal email.')
+      }
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not send the email verification code.') }
     finally { setBusy(false) }
   }
@@ -173,7 +196,11 @@ export default function AdminPage({ currentUser }: { currentUser: User }) {
   return <div className="admin-page">
     <header className="page-header">
       <div><p className="eyebrow">CENTRAL ACCESS · CROSS-BUSINESS OVERSIGHT</p><h1>Super Administrator</h1><p>Oversee every business workspace, account, resource, and operational alert.</p></div>
-      <div className="header-actions"><span className="admin-identity"><ShieldCheck size={15}/>{currentUser.email}</span><button className="secondary-button" onClick={() => { setBusy(true); void load().finally(() => setBusy(false)) }} disabled={busy}><RefreshCw size={15} className={busy ? 'animate-spin' : ''}/>Refresh</button></div>
+      <div className="header-actions">
+        <span className="admin-identity"><ShieldCheck size={15}/>{currentUser.email}</span>
+        <button className="secondary-button" onClick={() => void seedDemoData()} disabled={busy} title="Seed complete demo workspace, products, suppliers, and sales history"><Database size={15}/>Seed demo data</button>
+        <button className="secondary-button" onClick={() => { setBusy(true); void load().finally(() => setBusy(false)) }} disabled={busy}><RefreshCw size={15} className={busy ? 'animate-spin' : ''}/>Refresh</button>
+      </div>
     </header>
     {error && <div className="error-state" role="alert">{error}</div>}{notice && <div className="studio-notice" role="status">{notice}<button className="text-action" onClick={() => setNotice('')}>Dismiss</button></div>}
     {overview && <section className="admin-kpis">

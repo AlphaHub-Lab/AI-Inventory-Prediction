@@ -26,6 +26,13 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Ensure schema compatibility (auto-heals missing columns like owner_phone & tables on Vercel/Supabase)
+    try:
+        from .schema_migration import ensure_schema_compatibility
+        ensure_schema_compatibility(engine)
+    except Exception as e:
+        print(f"Notice on schema compatibility check: {e}")
+
     # In serverless environments like Vercel, avoid long-running migrations and seeding during cold start
     is_serverless = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
     if not is_serverless and not (os.getenv("SKIP_ALEMBIC_STARTUP") == "1" or settings.skip_alembic_startup or "inventory_system" in settings.database_url):

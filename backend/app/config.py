@@ -33,10 +33,12 @@ class Settings(BaseSettings):
     @field_validator("database_url")
     @classmethod
     def require_postgresql(cls, value: str) -> str:
+        if value.startswith("sqlite"):
+            return value
         if value.startswith("postgres://"):
             value = "postgresql://" + value[len("postgres://"):]
         if not value.startswith(("postgresql://", "postgresql+psycopg://")):
-            raise ValueError("DATABASE_URL must use PostgreSQL (postgresql:// or postgresql+psycopg://)")
+            raise ValueError("DATABASE_URL must use PostgreSQL (postgresql:// or postgresql+psycopg://) or SQLite (sqlite://)")
         return value
 
     @model_validator(mode="after")

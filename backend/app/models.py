@@ -46,7 +46,7 @@ class TimestampMixin:
 class Business(Base):
     __tablename__ = "businesses"
     __table_args__ = (CheckConstraint("business_type IN ('medical', 'grocery', 'restaurant', 'food', 'stationery', 'dairy', 'clothing', 'others')", name="ck_businesses_supported_type"),)
-    id: Mapped[Any] = mapped_column(UniversalId, primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(180), index=True)
     business_type: Mapped[str] = mapped_column(String(30), default="grocery", index=True)
     master_database_name: Mapped[str] = mapped_column(String(63), default="master_grocery")
@@ -61,7 +61,7 @@ class Business(Base):
 
 
 class BusinessScoped:
-    business_id: Mapped[Optional[Any]] = mapped_column(UniversalId, ForeignKey("businesses.id"), nullable=True, index=True)
+    business_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("businesses.id"), nullable=True, index=True)
 
 
 class Role(Base):
@@ -75,9 +75,9 @@ class UserPermission(Base):
     """Explicit operational permissions granted to an associate by their owner."""
     __tablename__ = "user_permissions"
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[Any] = mapped_column(UniversalId, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
     permission: Mapped[str] = mapped_column(String(80), index=True)
-    granted_by: Mapped[Optional[Any]] = mapped_column(UniversalId, ForeignKey("users.id"), nullable=True)
+    granted_by: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     __table_args__ = (UniqueConstraint("user_id", "permission", name="uq_user_permission"),)
 
@@ -85,7 +85,7 @@ class UserPermission(Base):
 class AuthSession(Base):
     __tablename__ = "auth_sessions"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    user_id: Mapped[Any] = mapped_column(UniversalId, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -104,7 +104,7 @@ class OwnerEmailVerification(Base):
 class User(BusinessScoped, Base, TimestampMixin):
     __tablename__ = "users"
     __table_args__ = (CheckConstraint("role IN ('admin', 'business_owner', 'associate')", name="ck_users_supported_role"),)
-    id: Mapped[Any] = mapped_column(UniversalId, primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     full_name: Mapped[str] = mapped_column(String(120))
     password_hash: Mapped[str] = mapped_column(String(255))
@@ -197,7 +197,7 @@ class InventoryTransaction(BusinessScoped, Base, TimestampMixin):
     weight_delta_g: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     transaction_type: Mapped[str] = mapped_column(String(30))
     note: Mapped[str] = mapped_column(String(500), default="")
-    user_id: Mapped[Optional[Any]] = mapped_column(UniversalId, ForeignKey("users.id"), nullable=True)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
 
 
 class Sale(BusinessScoped, Base):
@@ -299,7 +299,7 @@ class PurchaseOrder(BusinessScoped, Base, TimestampMixin):
     supplier_id: Mapped[int] = mapped_column(ForeignKey("suppliers.id"))
     status: Mapped[str] = mapped_column(String(20), default="draft")
     expected_delivery: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    created_by: Mapped[Optional[Any]] = mapped_column(UniversalId, ForeignKey("users.id"), nullable=True)
+    created_by: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
     items: Mapped[List["PurchaseOrderItem"]] = relationship(back_populates="purchase_order", cascade="all, delete-orphan")
 
 
@@ -331,7 +331,7 @@ class KnowledgeChunk(BusinessScoped, Base):
 class ChatbotConversation(BusinessScoped, Base, TimestampMixin):
     __tablename__ = "chatbot_conversations"
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[Optional[Any]] = mapped_column(UniversalId, ForeignKey("users.id"), nullable=True)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
     title: Mapped[str] = mapped_column(String(150), default="New conversation")
 
 
@@ -363,7 +363,7 @@ class ModelRun(BusinessScoped, Base, TimestampMixin):
 class AuditLog(BusinessScoped, Base):
     __tablename__ = "audit_logs"
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[Optional[Any]] = mapped_column(UniversalId, ForeignKey("users.id"), nullable=True)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
     action: Mapped[str] = mapped_column(String(100))
     entity: Mapped[str] = mapped_column(String(100))
     entity_id: Mapped[str] = mapped_column(String(100))

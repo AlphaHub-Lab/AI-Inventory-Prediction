@@ -22,14 +22,19 @@ def _sqlalchemy_database_url(value: str) -> str:
     return value
 
 
-engine = create_engine(
-    _sqlalchemy_database_url(settings.database_url),
-    pool_pre_ping=True,
-    pool_recycle=300,
-    pool_size=5,
-    max_overflow=10,
-    connect_args={"connect_timeout": 15}
-)
+db_url = _sqlalchemy_database_url(settings.database_url)
+engine_kwargs: dict = {"pool_pre_ping": True}
+if not db_url.startswith("sqlite"):
+    engine_kwargs.update({
+        "pool_recycle": 300,
+        "pool_size": 5,
+        "max_overflow": 10,
+        "connect_args": {"connect_timeout": 15}
+    })
+else:
+    engine_kwargs["connect_args"] = {"check_same_thread": False}
+
+engine = create_engine(db_url, **engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 

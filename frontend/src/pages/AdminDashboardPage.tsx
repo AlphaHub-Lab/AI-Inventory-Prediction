@@ -46,6 +46,19 @@ export default function AdminDashboardPage({ onNavigate }: { onNavigate: (page: 
     return () => { alive = false }
   }, [days, businessId, category, refreshKey])
 
+  const seedDemoData = async () => {
+    setLoading(true)
+    setError('')
+    try {
+      await api('/api/admin/seed', { method: 'POST' })
+      setRefreshKey(v => v + 1)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Unable to seed test data.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const selectedBusiness = data?.businesses.find(row => String(row.id) === businessId)
   const stats = data?.kpis
   const cards = stats ? [
@@ -63,6 +76,7 @@ export default function AdminDashboardPage({ onNavigate }: { onNavigate: (page: 
         <p>{selectedBusiness ? `${selectedBusiness.name} workspace` : 'Live signals across every business workspace'}{data ? ` · Updated ${new Date(data.last_updated).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}` : ''}</p>
       </div>
       <div className="header-actions">
+        <button className="secondary-button" onClick={() => void seedDemoData()} disabled={loading} title="Seed complete demo workspace, products, suppliers, and sales history"><Database size={15}/>Seed demo data</button>
         <button className="secondary-button" onClick={() => setRefreshKey(value => value + 1)} disabled={loading} title="Refresh global business signals"><RefreshCw size={15} className={loading ? 'animate-spin' : ''}/>Refresh</button>
         <button className="primary-button" onClick={() => onNavigate('admin')}><ShieldCheck size={15}/>Administrator controls</button>
       </div>
