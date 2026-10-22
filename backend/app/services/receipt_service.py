@@ -843,8 +843,8 @@ def save_receipt_import(
         supplier_id = sup_res[0]
     else:
         ins_sup = local_db.execute(text("""
-            INSERT INTO suppliers (name, gstin, address)
-            VALUES (:name, :gstin, :address)
+            INSERT INTO suppliers (name, gstin, address, email, phone, lead_time_days, minimum_order_quantity, reliability_score, created_at)
+            VALUES (:name, :gstin, :address, '', '', 3, 1, 0.90, NOW())
             RETURNING id
         """), {
             "name": sup_name,
@@ -967,8 +967,8 @@ def execute_atomic_receipt_confirmation(
             supplier_id = sup_res[0]
         else:
             ins = local_db.execute(text("""
-                INSERT INTO suppliers (name, contact_person, email)
-                VALUES (:name, 'Accounts Dept', :email)
+                INSERT INTO suppliers (name, contact_person, email, phone, lead_time_days, minimum_order_quantity, reliability_score, created_at)
+                VALUES (:name, 'Accounts Dept', :email, '', 3, 1, 0.90, NOW())
                 RETURNING id
             """), {"name": supplier_name, "email": user_email})
             supplier_id = ins.fetchone()[0]
@@ -1051,15 +1051,15 @@ def execute_atomic_receipt_confirmation(
                 sku_candidate = f"SKU-{re.sub(r'[^A-Z0-9]', '', raw_name.upper())[:10]}-{import_id}-{len(imported_products)+1}"
                 new_p = local_db.execute(text("""
                     INSERT INTO products (
-                        master_product_id, sku, barcode, product_name,
+                        name, product_name, master_product_id, sku, barcode,
                         current_stock, reorder_level, minimum_stock, maximum_stock,
                         selling_price, purchase_price, mrp, gst_percentage,
-                        supplier_id, status
+                        supplier_id, status, created_at, updated_at
                     ) VALUES (
-                        :master_id, :sku, :barcode, :name,
+                        :name, :name, :master_id, :sku, :barcode,
                         :stock, 10, 5, 500,
                         :selling, :cost, :mrp, :gst,
-                        :sup_id, 'active'
+                        :sup_id, 'active', NOW(), NOW()
                     ) RETURNING id
                 """), {
                     "master_id": master_id,
@@ -1098,13 +1098,13 @@ def execute_atomic_receipt_confirmation(
             # Record Inventory Transaction
             local_db.execute(text("""
                 INSERT INTO inventory_transactions (
-                    product_id, transaction_type, quantity,
+                    product_id, transaction_type, quantity, quantity_delta,
                     previous_stock, new_stock, reference_id,
-                    performed_by, note
+                    performed_by, note, created_at, updated_at, timestamp
                 ) VALUES (
-                    :pid, 'Purchase', :qty,
+                    :pid, 'Purchase', :qty, :qty,
                     :prev, :new, :ref,
-                    :user, :note
+                    :user, :note, NOW(), NOW(), NOW()
                 )
             """), {
                 "pid": product_id,
@@ -1162,14 +1162,19 @@ def execute_atomic_receipt_confirmation(
         })
 
         # 9. Store Audit Log
+        u_row = local_db.execute(text("SELECT id FROM users WHERE email = :email"), {"email": user_email}).fetchone()
+        u_id = u_row[0] if u_row else None
+
         local_db.execute(text("""
             INSERT INTO audit_logs (
-                user_id, action, resource, resource_id, metadata
+                user_id, action, entity, entity_id, payload,
+                resource, resource_id, metadata, created_at, timestamp
             ) VALUES (
-                :user, 'RECEIPT_IMPORTED', 'receipt_imports', :res_id, :meta
+                :user, 'RECEIPT_IMPORTED', 'receipt_imports', :res_id, CAST(:meta AS jsonb),
+                'receipt_imports', :res_id, CAST(:meta AS jsonb), NOW(), NOW()
             )
         """), {
-            "user": user_email,
+            "user": u_id,
             "res_id": str(import_id),
             "meta": json.dumps({
                 "invoice_number": invoice_number,

@@ -42,6 +42,7 @@ def seed_demo_data(db: Session, force: bool = False) -> dict:
     and 1 year of daily historical sales data. Safe to run repeatedly.
     """
     randomizer = random.Random(20260907)
+    db.info["super_admin"] = True
     
     # 1. Ensure at least one business workspace exists
     business = db.query(Business).first()
@@ -78,6 +79,22 @@ def seed_demo_data(db: Session, force: bool = False) -> dict:
     for email, name, pwd, role, b_id in users_data:
         if not db.query(User).filter_by(email=email).first():
             db.add(User(email=email, full_name=name, password_hash=hash_password(pwd), role=role, business_id=b_id, is_active=True))
+    db.flush()
+
+    # Ensure associate has required operational permissions
+    staff_user = db.query(User).filter_by(email="staff@inventory.example.com").first()
+    if staff_user:
+        from .models import UserPermission
+        default_staff_perms = [
+            "inventory.view", "inventory.create", "inventory.update",
+            "sales.view", "sales.create",
+            "orders.view", "orders.create",
+            "receipt.scan", "receipt.extract", "receipt.review", "receipt.import"
+        ]
+        for p in default_staff_perms:
+            if not db.query(UserPermission).filter_by(user_id=staff_user.id, permission=p).first():
+                db.add(UserPermission(user_id=staff_user.id, permission=p))
+        db.flush()
 
     # 4. Ensure demo categories exist
     categories = {}

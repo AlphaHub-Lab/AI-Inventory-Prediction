@@ -627,8 +627,8 @@ def admin_seed_data(db: Session = Depends(get_db), actor: User = Depends(require
 
 
 @api.put("/admin/businesses/{business_id}", tags=["administrator"])
-def update_business_status(business_id: Any, body: BusinessStatusUpdate, db: Session = Depends(get_db), actor: User = Depends(require_roles("admin"))):
-    business = db.get(Business, business_id)
+def update_business_status(business_id: int, body: BusinessStatusUpdate, db: Session = Depends(get_db), actor: User = Depends(require_roles("admin"))):
+    business = db.get(Business, int(business_id))
     if not business:
         raise HTTPException(404, "Business not found")
     business.is_active = body.is_active
@@ -693,15 +693,15 @@ def delete_admin_account(user_id: Any, db: Session = Depends(get_db), actor: Use
             raise HTTPException(409, "The last active administrator cannot be deleted")
 
     from sqlalchemy import Integer, bindparam, inspect as sa_inspect
-    from ..database_manager import get_local_session
+    from ..database_manager import get_local_session, is_single_database_mode
 
     # Local operational records are shared workspace history. Detach the account
     # identity from those records while retaining products, orders, receipts, and audit history.
     local_sessions: list[Session] = []
     local_names = {name for (name,) in db.query(Business.local_database_name).filter(Business.local_database_name.is_not(None)).all() if name}
-    # Legacy single-database deployments route every tenant session to the
+    # Single-database deployments (Supabase, Neon, etc.) route every tenant session to the
     # configured database; scan it once to avoid duplicate concurrent updates.
-    if engine.url.database in {"postgres", "inventory_system"} and local_names:
+    if (is_single_database_mode() or engine.url.database in {"postgres", "inventory_system", "admin_db"}) and local_names:
         local_names = {engine.url.database}
     elif engine.dialect.name == "postgresql" and local_names:
         # Old business rows can outlive a tenant database. They have no local
@@ -805,7 +805,8 @@ def delete_admin_account(user_id: Any, db: Session = Depends(get_db), actor: Use
 
 
 @api.delete("/admin/businesses/{business_id}", status_code=200, tags=["administrator"])
-def delete_admin_business(business_id: Any, db: Session = Depends(get_db), actor: User = Depends(require_roles("admin"))):
+def delete_admin_business(business_id: int, db: Session = Depends(get_db), actor: User = Depends(require_roles("admin"))):
+    business_id = int(business_id)
     business = db.query(Business).filter(Business.id == business_id).with_for_update().first()
     if not business:
         raise HTTPException(404, "Business not found")
@@ -861,13 +862,17 @@ def delete_admin_business(business_id: Any, db: Session = Depends(get_db), actor
         audit(db, actor, "delete", "business", business.id, {"name": business.name, "business_type": business.business_type})
         db.delete(business)
         from urllib.parse import urlparse
-        if local_database_name and re.fullmatch(r"local_business_\d+", local_database_name) and urlparse(engine.url.render_as_string(hide_password=True)).path.lstrip("/") not in {"postgres", "inventory_system"}:
+        from ..database_manager import is_single_database_mode
+        if not is_single_database_mode() and local_database_name and re.fullmatch(r"local_business_\d+", local_database_name) and urlparse(engine.url.render_as_string(hide_password=True)).path.lstrip("/") not in {"postgres", "inventory_system"}:
             from ..database_manager import get_engine_for_db
-            tenant_engine = get_engine_for_db(local_database_name, ensure_schema=False)
-            tenant_engine.dispose()
-            postgres_engine = get_engine_for_db("postgres")
-            with postgres_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
-                connection.execute(text(f'DROP DATABASE IF EXISTS "{local_database_name}" WITH (FORCE)'))
+            try:
+                tenant_engine = get_engine_for_db(local_database_name, ensure_schema=False)
+                tenant_engine.dispose()
+                postgres_engine = get_engine_for_db("postgres")
+                with postgres_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+                    connection.execute(text(f'DROP DATABASE IF EXISTS "{local_database_name}" WITH (FORCE)'))
+            except Exception as drop_err:
+                logger.warning("Could not drop physical database %s: %s", local_database_name, drop_err)
         db.commit()
     except Exception as exc:
         db.rollback()

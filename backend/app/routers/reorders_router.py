@@ -1662,7 +1662,7 @@ def confirm_wholesaler_into_stock(
                 :user, 'CONFIRMED_SUPPLIER_IMPORT', 'purchases', :res_id, :meta, NOW()
             )
         """), {
-            "user": user.email,
+            "user": user.id,
             "res_id": str(purchase_id),
             "meta": json.dumps({
                 "invoice_number": inv_num,

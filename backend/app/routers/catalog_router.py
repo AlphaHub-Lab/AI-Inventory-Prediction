@@ -258,7 +258,7 @@ def import_master_product(
         INSERT INTO audit_logs (user_id, action, resource, resource_id, metadata)
         VALUES (:user, 'PRODUCT_IMPORTED', 'products', :pid, :meta)
     """), {
-        "user": user.email,
+        "user": user.id,
         "pid": str(new_id),
         "meta": '{"master_id": "' + str(m_id) + '", "product_name": "' + m_name + '"}'
     })
