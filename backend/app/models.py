@@ -3,39 +3,29 @@ from typing import Any, List, Optional
 import uuid
 from sqlalchemy import event
 from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, Float, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint
-from sqlalchemy.types import TypeDecorator
+from sqlalchemy.types import UserDefinedType
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, Session, mapped_column, relationship, with_loader_criteria
 from .db import Base
 
 
-class UniversalId(TypeDecorator):
+class UniversalId(UserDefinedType):
     """Platform-independent ID type that works transparently with UUID columns in PostgreSQL
-    (e.g., Supabase) and INTEGER/String columns in SQLite or local environments."""
-    impl = String
+    (e.g., Supabase), INTEGER columns in PostgreSQL/SQLite, and String IDs without forcing casts."""
     cache_ok = True
 
-    def load_dialect_impl(self, dialect):
-        if dialect.name == "postgresql":
-            return dialect.type_descriptor(PG_UUID(as_uuid=True))
-        return dialect.type_descriptor(String(64))
+    def get_col_spec(self, **kw):
+        return "VARCHAR(64)"
 
-    def process_bind_param(self, value, dialect):
-        if value is None:
-            return None
-        if dialect.name == "postgresql":
-            if isinstance(value, uuid.UUID):
-                return value
-            try:
-                return uuid.UUID(str(value))
-            except (ValueError, AttributeError, TypeError):
-                return value
-        if isinstance(value, uuid.UUID):
-            return str(value)
-        return value
+    def bind_processor(self, dialect):
+        def process(value):
+            return value
+        return process
 
-    def process_result_value(self, value, dialect):
-        return value
+    def result_processor(self, dialect, coltype):
+        def process(value):
+            return value
+        return process
 
 
 class TimestampMixin:
@@ -46,7 +36,7 @@ class TimestampMixin:
 class Business(Base):
     __tablename__ = "businesses"
     __table_args__ = (CheckConstraint("business_type IN ('medical', 'grocery', 'restaurant', 'food', 'stationery', 'dairy', 'clothing', 'others')", name="ck_businesses_supported_type"),)
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[Any] = mapped_column(UniversalId(), primary_key=True)
     name: Mapped[str] = mapped_column(String(180), index=True)
     business_type: Mapped[str] = mapped_column(String(30), default="grocery", index=True)
     master_database_name: Mapped[str] = mapped_column(String(63), default="master_grocery")
@@ -61,12 +51,12 @@ class Business(Base):
 
 
 class BusinessScoped:
-    business_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("businesses.id"), nullable=True, index=True)
+    business_id: Mapped[Optional[Any]] = mapped_column(UniversalId(), ForeignKey("businesses.id"), nullable=True, index=True)
 
 
 class Role(Base):
     __tablename__ = "roles"
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[Any] = mapped_column(UniversalId(), primary_key=True)
     name: Mapped[str] = mapped_column(String(40), unique=True, index=True)
     description: Mapped[str] = mapped_column(String(250), default="")
 
@@ -75,9 +65,9 @@ class UserPermission(Base):
     """Explicit operational permissions granted to an associate by their owner."""
     __tablename__ = "user_permissions"
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[Any] = mapped_column(UniversalId(), ForeignKey("users.id", ondelete="CASCADE"), index=True)
     permission: Mapped[str] = mapped_column(String(80), index=True)
-    granted_by: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    granted_by: Mapped[Optional[Any]] = mapped_column(UniversalId(), ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     __table_args__ = (UniqueConstraint("user_id", "permission", name="uq_user_permission"),)
 
@@ -85,7 +75,7 @@ class UserPermission(Base):
 class AuthSession(Base):
     __tablename__ = "auth_sessions"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    user_id = mapped_column(UniversalId(), ForeignKey("users.id", ondelete="CASCADE"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -104,7 +94,7 @@ class OwnerEmailVerification(Base):
 class User(BusinessScoped, Base, TimestampMixin):
     __tablename__ = "users"
     __table_args__ = (CheckConstraint("role IN ('admin', 'business_owner', 'associate')", name="ck_users_supported_role"),)
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id = mapped_column(UniversalId(), primary_key=True, default=lambda: None)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     full_name: Mapped[str] = mapped_column(String(120))
     password_hash: Mapped[str] = mapped_column(String(255))
@@ -136,7 +126,7 @@ class Category(BusinessScoped, Base):
 
 class Supplier(BusinessScoped, Base, TimestampMixin):
     __tablename__ = "suppliers"
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[Any] = mapped_column(UniversalId(), primary_key=True)
     name: Mapped[str] = mapped_column(String(150), index=True)
     email: Mapped[str] = mapped_column(String(255), default="")
     phone: Mapped[str] = mapped_column(String(40), default="")
@@ -155,7 +145,7 @@ class Product(BusinessScoped, Base, TimestampMixin):
     category_id: Mapped[int] = mapped_column(ForeignKey("categories.id"))
     unit: Mapped[str] = mapped_column(String(30), default="unit")
     price: Mapped[float] = mapped_column(Numeric(12, 2))
-    supplier_id: Mapped[int] = mapped_column(ForeignKey("suppliers.id"))
+    supplier_id: Mapped[Any] = mapped_column(UniversalId(), ForeignKey("suppliers.id"))
     manufacturing_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     expiry_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     current_stock: Mapped[int] = mapped_column(Integer, default=0)
@@ -197,7 +187,7 @@ class InventoryTransaction(BusinessScoped, Base, TimestampMixin):
     weight_delta_g: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     transaction_type: Mapped[str] = mapped_column(String(30))
     note: Mapped[str] = mapped_column(String(500), default="")
-    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    user_id: Mapped[Optional[Any]] = mapped_column(UniversalId(), ForeignKey("users.id"), nullable=True)
 
 
 class Sale(BusinessScoped, Base):
@@ -296,10 +286,10 @@ class ReorderRecommendation(BusinessScoped, Base, TimestampMixin):
 class PurchaseOrder(BusinessScoped, Base, TimestampMixin):
     __tablename__ = "purchase_orders"
     id: Mapped[int] = mapped_column(primary_key=True)
-    supplier_id: Mapped[int] = mapped_column(ForeignKey("suppliers.id"))
+    supplier_id: Mapped[Any] = mapped_column(UniversalId(), ForeignKey("suppliers.id"))
     status: Mapped[str] = mapped_column(String(20), default="draft")
     expected_delivery: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    created_by: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    created_by: Mapped[Optional[Any]] = mapped_column(UniversalId(), ForeignKey("users.id"), nullable=True)
     items: Mapped[List["PurchaseOrderItem"]] = relationship(back_populates="purchase_order", cascade="all, delete-orphan")
 
 
@@ -331,7 +321,7 @@ class KnowledgeChunk(BusinessScoped, Base):
 class ChatbotConversation(BusinessScoped, Base, TimestampMixin):
     __tablename__ = "chatbot_conversations"
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    user_id: Mapped[Optional[Any]] = mapped_column(UniversalId(), ForeignKey("users.id"), nullable=True)
     title: Mapped[str] = mapped_column(String(150), default="New conversation")
 
 
@@ -363,7 +353,7 @@ class ModelRun(BusinessScoped, Base, TimestampMixin):
 class AuditLog(BusinessScoped, Base):
     __tablename__ = "audit_logs"
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    user_id: Mapped[Optional[Any]] = mapped_column(UniversalId(), ForeignKey("users.id"), nullable=True)
     action: Mapped[str] = mapped_column(String(100))
     entity: Mapped[str] = mapped_column(String(100))
     entity_id: Mapped[str] = mapped_column(String(100))

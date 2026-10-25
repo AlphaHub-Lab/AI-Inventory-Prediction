@@ -83,69 +83,53 @@ def login(request: Request, body: LoginRequest, response: Response, db: Session 
     if not user or not user.is_active or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
     from ..config import get_settings
+    settings = get_settings()
     session_id = secrets.token_urlsafe(32)
-    db.add(AuthSession(id=session_id, user_id=user.id, expires_at=datetime.utcnow() + timedelta(days=get_settings().refresh_token_days)))
+    db.add(AuthSession(id=session_id, user_id=user.id, expires_at=datetime.utcnow() + timedelta(days=settings.refresh_token_days)))
     db.commit()
 
     access_token = create_token(user.email, user.role, session_id)
     refresh_token = create_token(user.email, user.role, session_id, "refresh")
 
+    # Detect production environment for secure cookie settings
+    import os
+    is_production = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or settings.environment.lower() in ("production", "prod"))
+    cookie_secure = is_production
+    cookie_samesite: str = "none" if is_production else "lax"
+
     # Set real-time HTTP-only cookies (zero localStorage required)
-    cookie_max_age = get_settings().refresh_token_days * 86400
-    access_cookie_max_age = get_settings().access_token_minutes * 60
+    cookie_max_age = settings.refresh_token_days * 86400
+    access_cookie_max_age = settings.access_token_minutes * 60
     response.set_cookie(
         key="access_token",
         value=access_token,
         httponly=True,
-        samesite="lax",
+        samesite=cookie_samesite,
         max_age=access_cookie_max_age,
-        secure=False,
+        secure=cookie_secure,
         path="/"
     )
     response.set_cookie(
         key="session_token",
         value=access_token,
         httponly=True,
-        samesite="lax",
+        samesite=cookie_samesite,
         max_age=access_cookie_max_age,
-        secure=False,
+        secure=cookie_secure,
         path="/"
     )
     response.set_cookie(
         key="refresh_token",
         value=refresh_token,
         httponly=True,
-        samesite="lax",
+        samesite=cookie_samesite,
         max_age=cookie_max_age,
-        secure=False,
+        secure=cookie_secure,
         path="/"
     )
 
-    # Sync real-time session into sessions table
-    try:
-        client_ip = request.client.host if request.client else "127.0.0.1"
-        u_agent = request.headers.get("user-agent", "Web Client")
-        exp = datetime.utcnow() + timedelta(days=get_settings().refresh_token_days)
-        db.execute(text("""
-            INSERT INTO sessions (user_id, token, ip_address, user_agent, expires_at, is_active)
-            VALUES (:uid, :tok, :ip, :ua, :exp, true)
-        """), {
-            "uid": user.id,
-            "tok": access_token[:255],
-            "ip": client_ip[:50],
-            "ua": u_agent[:255],
-            "exp": exp
-        })
-        db.commit()
-    except Exception:
-        # This secondary legacy `sessions` table is optional. If it is absent
-        # (as on the current admin_db schema), PostgreSQL marks the transaction
-        # failed; roll it back so response serialization can still load the
-        # user's business relationship. The primary auth_sessions row was
-        # committed above and remains the authoritative revocable session.
-        db.rollback()
-
     return {"access_token": access_token, "refresh_token": refresh_token, "user": user}
+
 
 
 @api.post("/auth/refresh", tags=["auth"])
@@ -168,14 +152,20 @@ def refresh_token(request: Request, response: Response, refresh_token: str | Non
             raise ValueError
         session.expires_at = datetime.utcnow() + timedelta(days=get_settings().refresh_token_days)
         db.commit()
-    except (JWTError, ValueError):
+    except Exception:
         raise HTTPException(401, "Invalid refresh token")
     access_token = create_token(user.email, user.role, session.id)
     refresh_token = create_token(user.email, user.role, session.id, "refresh")
-    settings = get_settings()
+    import os
+    is_production = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or settings.environment.lower() in ("production", "prod"))
+    cookie_secure = is_production
+    cookie_samesite: str = "none" if is_production else "lax"
+    cookie_max_age = settings.refresh_token_days * 86400
+    access_cookie_max_age = settings.access_token_minutes * 60
+
     for cookie_name in ("access_token", "session_token"):
-        response.set_cookie(cookie_name, access_token, httponly=True, samesite="lax", max_age=settings.access_token_minutes * 60, secure=False, path="/")
-    response.set_cookie("refresh_token", refresh_token, httponly=True, samesite="lax", max_age=settings.refresh_token_days * 86400, secure=False, path="/")
+        response.set_cookie(cookie_name, access_token, httponly=True, samesite=cookie_samesite, max_age=access_cookie_max_age, secure=cookie_secure, path="/")
+    response.set_cookie("refresh_token", refresh_token, httponly=True, samesite=cookie_samesite, max_age=cookie_max_age, secure=cookie_secure, path="/")
     return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
 
 
@@ -1318,15 +1308,6 @@ def generate_forecasts(body: ForecastRequest, db: Session = Depends(get_db), _: 
     return {"generated": len(generated), "horizon_days": body.horizon_days, "models": models}
 
 
-@api.get("/forecasts", tags=["forecasts"])
-def list_forecasts(product_id: int | None = None, horizon_days: int = Query(7, ge=1, le=30), db: Session = Depends(get_db), _: User = Depends(require_permission("ai.forecast"))):
-    products = [db.get(Product, product_id)] if product_id else db.query(Product).filter_by(status="active").all()
-    if not products or not products[0]: raise HTTPException(404, "Product not found")
-    end = date.today() + timedelta(days=horizon_days)
-    rows = db.query(Forecast).filter(Forecast.forecast_date > date.today(), Forecast.forecast_date <= end)
-    if product_id: rows = rows.filter(Forecast.product_id == product_id)
-    return [{"id": f.id, "product_id": f.product_id, "product_name": db.get(Product, f.product_id).name, "forecast_date": f.forecast_date, "predicted_quantity": f.predicted_quantity, "model_name": f.model_name, "model_version": f.model_version, "horizon_days": f.horizon_days} for f in rows.order_by(Forecast.forecast_date).all()]
-
 
 @api.get("/forecasts/{product_id}/series", tags=["forecasts"])
 def forecast_series(product_id: int, history_days: int = Query(30, ge=7, le=365), db: Session = Depends(get_db), _: User = Depends(require_permission("ai.forecast"))):
@@ -1391,17 +1372,21 @@ def list_forecasts(
     db: Session = Depends(get_db),
     _: User = Depends(require_permission("ai.forecast"))
 ):
-    query = db.query(Forecast)
+    today = date.today()
+    end_date = today + timedelta(days=horizon_days)
+    query = db.query(Forecast).filter(Forecast.forecast_date > today, Forecast.forecast_date <= end_date)
     if product_id:
         query = query.filter(Forecast.product_id == product_id)
-    if horizon_days:
-        query = query.filter(Forecast.horizon_days == horizon_days)
 
-    today = date.today()
-    rows = query.filter(Forecast.forecast_date >= today).order_by(Forecast.forecast_date.asc()).limit(300).all()
+    rows = query.order_by(Forecast.forecast_date.asc()).limit(300).all()
 
-    if not rows:
-        rows = query.order_by(Forecast.forecast_date.desc()).limit(300).all()
+    if (not rows or (product_id and len(rows) < horizon_days)) and product_id:
+        p_obj = db.get(Product, product_id)
+        if p_obj:
+            from ..services.forecasting import forecast_product
+            rows = forecast_product(db, p_obj, horizon_days)
+    elif not rows:
+        rows = db.query(Forecast).order_by(Forecast.forecast_date.desc()).limit(300).all()
 
     product_ids = {f.product_id for f in rows}
     products = {p.id: p for p in db.query(Product).filter(Product.id.in_(product_ids)).all()} if product_ids else {}

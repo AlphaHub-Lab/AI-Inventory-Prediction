@@ -27,7 +27,7 @@ class ImportProductInput(BaseModel):
     mrp: Optional[float] = None
     initial_stock: float = Field(default=0.0, ge=0)
     reorder_level: float = Field(default=10.0, ge=0)
-    supplier_id: Optional[int] = None
+    supplier_id: Optional[Any] = None
     batch_number: Optional[str] = None
     expiry_date: Optional[str] = None
 

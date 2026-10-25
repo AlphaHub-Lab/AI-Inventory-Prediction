@@ -54,7 +54,8 @@ def get_engine_for_db(dbname: str, *, ensure_schema: bool = True) -> Engine:
             max_overflow=10,
             pool_pre_ping=True,
             pool_recycle=300,
-            connect_args={"connect_timeout": 30}
+            connect_args={"connect_timeout": 30},
+            use_insertmanyvalues=False
         )
         _SESSION_MAKERS[safe_dbname] = sessionmaker(
             autocommit=False,
