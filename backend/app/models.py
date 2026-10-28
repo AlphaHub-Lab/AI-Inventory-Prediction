@@ -1,12 +1,15 @@
 from datetime import date, datetime
+import logging
 from typing import Any, List, Optional
 import uuid
 from sqlalchemy import event
-from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, Float, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, Float, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint, text
 from sqlalchemy.types import UserDefinedType
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, Session, mapped_column, relationship, with_loader_criteria
 from .db import Base
+
+logger = logging.getLogger("models")
 
 
 class UniversalId(UserDefinedType):
@@ -29,14 +32,14 @@ class UniversalId(UserDefinedType):
 
 
 class TimestampMixin:
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=text("CURRENT_TIMESTAMP"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, server_default=text("CURRENT_TIMESTAMP"))
 
 
 class Business(Base):
     __tablename__ = "businesses"
     __table_args__ = (CheckConstraint("business_type IN ('medical', 'grocery', 'restaurant', 'food', 'stationery', 'dairy', 'clothing', 'others')", name="ck_businesses_supported_type"),)
-    id: Mapped[Any] = mapped_column(UniversalId(), primary_key=True)
+    id: Mapped[Any] = mapped_column(UniversalId(), primary_key=True, default=lambda: str(uuid.uuid4()))
     name: Mapped[str] = mapped_column(String(180), index=True)
     business_type: Mapped[str] = mapped_column(String(30), default="grocery", index=True)
     master_database_name: Mapped[str] = mapped_column(String(63), default="master_grocery")
@@ -47,7 +50,18 @@ class Business(Base):
     phone: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     address: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=text("CURRENT_TIMESTAMP"))
+
+
+class DatabaseRegistry(Base):
+    __tablename__ = "database_registry"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    database_name: Mapped[str] = mapped_column(String(63), unique=True, index=True)
+    database_type: Mapped[str] = mapped_column(String(16), index=True)
+    business_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    business_id: Mapped[Optional[Any]] = mapped_column(UniversalId(), ForeignKey("businesses.id", ondelete="CASCADE"), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=text("CURRENT_TIMESTAMP"))
 
 
 class BusinessScoped:
@@ -56,7 +70,7 @@ class BusinessScoped:
 
 class Role(Base):
     __tablename__ = "roles"
-    id: Mapped[Any] = mapped_column(UniversalId(), primary_key=True)
+    id: Mapped[Any] = mapped_column(UniversalId(), primary_key=True, default=lambda: str(uuid.uuid4()))
     name: Mapped[str] = mapped_column(String(40), unique=True, index=True)
     description: Mapped[str] = mapped_column(String(250), default="")
 
@@ -94,7 +108,7 @@ class OwnerEmailVerification(Base):
 class User(BusinessScoped, Base, TimestampMixin):
     __tablename__ = "users"
     __table_args__ = (CheckConstraint("role IN ('admin', 'business_owner', 'associate')", name="ck_users_supported_role"),)
-    id = mapped_column(UniversalId(), primary_key=True, default=lambda: None)
+    id = mapped_column(UniversalId(), primary_key=True, default=lambda: str(uuid.uuid4()))
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     full_name: Mapped[str] = mapped_column(String(120))
     password_hash: Mapped[str] = mapped_column(String(255))
@@ -104,11 +118,21 @@ class User(BusinessScoped, Base, TimestampMixin):
 
     @property
     def business_name(self) -> str | None:
-        return self.business.name if self.business else None
+        if hasattr(self, "business_name_val"):
+            return self.business_name_val
+        try:
+            return self.business.name if self.business else None
+        except Exception:
+            return None
 
     @property
     def business_type(self) -> str | None:
-        return self.business.business_type if self.business else None
+        if hasattr(self, "business_type_val"):
+            return self.business_type_val
+        try:
+            return self.business.business_type if self.business else None
+        except Exception:
+            return None
 
 
 class Category(BusinessScoped, Base):
@@ -126,7 +150,7 @@ class Category(BusinessScoped, Base):
 
 class Supplier(BusinessScoped, Base, TimestampMixin):
     __tablename__ = "suppliers"
-    id: Mapped[Any] = mapped_column(UniversalId(), primary_key=True)
+    id: Mapped[Any] = mapped_column(UniversalId(), primary_key=True, default=lambda: str(uuid.uuid4()))
     name: Mapped[str] = mapped_column(String(150), index=True)
     email: Mapped[str] = mapped_column(String(255), default="")
     phone: Mapped[str] = mapped_column(String(40), default="")
@@ -366,9 +390,12 @@ def scope_business_queries(execute_state) -> None:
     session = execute_state.session
     business_id = session.info.get("business_id")
     if execute_state.is_select and business_id is not None and not session.info.get("super_admin"):
+        logger.debug("Applying business_id scope (%s) to SELECT query", business_id)
         execute_state.statement = execute_state.statement.options(
             with_loader_criteria(BusinessScoped, lambda row: row.business_id == business_id, include_aliases=True)
         )
+    elif execute_state.is_select and business_id is None and not session.info.get("super_admin"):
+        logger.debug("Executing SELECT query without tenant scoping (no business_id on session)")
 
 
 @event.listens_for(Session, "before_flush")
@@ -377,14 +404,19 @@ def assign_business_to_new_records(session: Session, _flush_context, _instances)
     if session.info.get("super_admin"):
         for row in session.new:
             if isinstance(row, BusinessScoped) and row.business_id is None and not (isinstance(row, User) and row.role == "admin") and not isinstance(row, AuditLog):
+                logger.error("Super-admin attempted creating tenant record without business_id: %s", type(row).__name__)
                 raise ValueError("Choose a business workspace before creating tenant data")
         return
     if business_id is None:
+        for row in session.new:
+            if isinstance(row, BusinessScoped) and row.business_id is None and not (isinstance(row, User) and row.role == "admin") and not isinstance(row, AuditLog):
+                logger.warning("Record of type %s created with business_id=None while session has no business context", type(row).__name__)
         return
     for row in session.new:
         if isinstance(row, BusinessScoped):
             if isinstance(row, User) and row.role == "admin":
                 continue
             if row.business_id not in (None, business_id):
+                logger.error("Tenant isolation violation: record business_id %s != session business_id %s on %s", row.business_id, business_id, type(row).__name__)
                 raise ValueError("Cannot create a record for another business")
             row.business_id = business_id

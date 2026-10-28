@@ -79,7 +79,7 @@ def sale_data(sale: Sale) -> dict:
 @api.post("/auth/login", response_model=TokenResponse, tags=["auth"])
 @limiter.limit("15/minute")
 def login(request: Request, body: LoginRequest, response: Response, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == body.email).first()
+    user = db.query(User).options(joinedload(User.business)).filter(User.email == body.email).first()
     if not user or not user.is_active or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
     from ..config import get_settings
@@ -144,7 +144,7 @@ def refresh_token(request: Request, response: Response, refresh_token: str | Non
         payload = jwt.decode(refresh_token, get_settings().secret_key, algorithms=[ALGORITHM])
         if payload.get("type") != "refresh" or not payload.get("sid"):
             raise ValueError
-        user = db.query(User).filter_by(email=payload.get("sub"), is_active=True).first()
+        user = db.query(User).options(joinedload(User.business)).filter_by(email=payload.get("sub"), is_active=True).first()
         if not user:
             raise ValueError
         session = db.query(AuthSession).filter_by(id=payload["sid"], user_id=user.id, revoked_at=None).first()
@@ -657,7 +657,7 @@ def admin_accounts(db: Session = Depends(get_db), _: User = Depends(require_role
     movement_counts = grouped_counts(InventoryTransaction.user_id)
     conversation_counts = grouped_counts(ChatbotConversation.user_id)
     order_counts = grouped_counts(PurchaseOrder.created_by)
-    users = db.query(User).order_by(User.created_at.desc()).all()
+    users = db.query(User).options(joinedload(User.business)).order_by(User.created_at.desc()).all()
     return [{
         "id": user.id, "email": user.email, "full_name": user.full_name, "role": user.role,
         "business_id": user.business_id, "business_name": user.business_name,

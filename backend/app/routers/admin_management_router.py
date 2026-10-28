@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from ..database_manager import get_admin_session, get_master_session, provision_new_business_database
 from ..dependencies import get_admin_db, get_current_user, require_roles
-from ..models import AuditLog, Business, User
+from ..models import AuditLog, Business, DatabaseRegistry, User
 from ..security import hash_password
 from ..rate_limit import limiter
 
@@ -97,17 +97,13 @@ def create_business_with_dedicated_database(
     admin_db.add(owner)
 
     # 4. Register in database_registry
-    admin_db.execute(text("""
-        INSERT INTO database_registry (
-            database_name, database_type, business_type, business_id, status, created_at
-        ) VALUES (
-            :dbname, 'local', :btype, :bid, 'active', NOW()
-        )
-    """), {
-        "dbname": local_db_name,
-        "btype": b_type,
-        "bid": business.id
-    })
+    admin_db.add(DatabaseRegistry(
+        database_name=local_db_name,
+        database_type="local",
+        business_type=b_type,
+        business_id=business.id,
+        status="active"
+    ))
 
     # 5. Record central audit log
     admin_db.add(AuditLog(
@@ -145,20 +141,16 @@ def get_database_registry(
     admin_db: Session = Depends(get_admin_db)
 ):
     """View all registered databases across the multi-tenant PostgreSQL cluster."""
-    rows = admin_db.execute(text("""
-        SELECT id, database_name, database_type, business_type, business_id, status, created_at
-        FROM database_registry
-        ORDER BY id ASC
-    """)).fetchall()
+    rows = admin_db.query(DatabaseRegistry).order_by(DatabaseRegistry.id.asc()).all()
 
     return [{
-        "id": r[0],
-        "database_name": r[1],
-        "database_type": r[2],
-        "business_type": r[3],
-        "business_id": r[4],
-        "status": r[5],
-        "created_at": r[6].isoformat() if r[6] else None
+        "id": r.id,
+        "database_name": r.database_name,
+        "database_type": r.database_type,
+        "business_type": r.business_type,
+        "business_id": r.business_id,
+        "status": r.status,
+        "created_at": r.created_at.isoformat() if r.created_at else None
     } for r in rows]
 
 

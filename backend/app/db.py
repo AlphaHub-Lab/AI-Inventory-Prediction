@@ -1,3 +1,5 @@
+import logging
+import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from fastapi import Request
@@ -5,6 +7,7 @@ from jose import JWTError, jwt
 from .config import get_settings
 from .security import ALGORITHM
 
+logger = logging.getLogger("db")
 settings = get_settings()
 
 
@@ -23,13 +26,25 @@ def _sqlalchemy_database_url(value: str) -> str:
 
 
 db_url = _sqlalchemy_database_url(settings.database_url)
+is_serverless = bool(
+    os.getenv("VERCEL")
+    or os.getenv("VERCEL_ENV")
+    or os.getenv("AWS_LAMBDA_FUNCTION_NAME")
+    or os.getenv("SINGLE_DATABASE_MODE", "").lower() in ("1", "true", "yes")
+    or "pooler.supabase.com" in db_url
+    or "supabase.co" in db_url
+    or "neon.tech" in db_url
+)
 engine_kwargs: dict = {"pool_pre_ping": True}
 if not db_url.startswith("sqlite"):
+    pool_size = 2 if is_serverless else 5
+    max_overflow = 3 if is_serverless else 10
+    connect_timeout = 10 if is_serverless else 30
     engine_kwargs.update({
         "pool_recycle": 300,
-        "pool_size": 5,
-        "max_overflow": 10,
-        "connect_args": {"connect_timeout": 30},
+        "pool_size": pool_size,
+        "max_overflow": max_overflow,
+        "connect_args": {"connect_timeout": connect_timeout},
         "use_insertmanyvalues": False,
     })
 else:
@@ -56,8 +71,13 @@ def get_db(request: Request):
             if token:
                 try:
                     payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
-                except JWTError:
+                except JWTError as exc:
+                    logger.warning("JWT decode failed in get_db for path %s: %s", request.url.path, exc)
                     payload = {}
+                except Exception as exc:
+                    logger.warning("Unexpected error decoding token in get_db: %s", exc)
+                    payload = {}
+
                 if payload.get("type") == "access" and payload.get("sub"):
                     # Import at request time to avoid a cycle (models imports Base from this module).
                     from .models import User
@@ -68,6 +88,10 @@ def get_db(request: Request):
                             db.info["super_admin"] = True
                         elif tenant_user.business_id is not None:
                             db.info["business_id"] = tenant_user.business_id
+                    else:
+                        logger.warning("Tenant user %s from token not found in database", payload.get("sub"))
+                elif token and not payload:
+                    logger.warning("Token provided for %s but payload was invalid", request.url.path)
         yield db
     finally:
         db.close()

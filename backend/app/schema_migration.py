@@ -6,6 +6,7 @@ never experience missing column or missing table runtime errors.
 """
 
 import logging
+import uuid
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from .db import Base
@@ -148,20 +149,6 @@ PG_COLUMN_UPDATES = [
     "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS expected_delivery DATE;",
     "ALTER TABLE purchase_order_items ADD COLUMN IF NOT EXISTS business_id INTEGER;",
     "ALTER TABLE purchase_order_items ADD COLUMN IF NOT EXISTS total_price NUMERIC(14,2) DEFAULT 0;",
-    "ALTER TABLE purchase_items ADD COLUMN IF NOT EXISTS line_total NUMERIC(12,2) DEFAULT 0;",
-    "ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS uploaded_by VARCHAR(255);",
-    "ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS supplier_id INTEGER;",
-    "ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS supplier_name_extracted VARCHAR(255);",
-    "ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS processing_status VARCHAR(50) DEFAULT 'review_required';",
-    "ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS gst_amount NUMERIC(14,2) DEFAULT 0;",
-    "ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS ai_confidence NUMERIC(5,2) DEFAULT 0;",
-    "ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS raw_extraction_json TEXT;",
-    "ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ;",
-    "ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS confirmed_by VARCHAR(255);",
-    "ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS business_id INTEGER;",
-    "ALTER TABLE receipt_import_items ADD COLUMN IF NOT EXISTS master_product_id VARCHAR(100);",
-    "ALTER TABLE receipt_import_items ADD COLUMN IF NOT EXISTS confidence_score NUMERIC(5,2) DEFAULT 0;",
-    "ALTER TABLE receipt_import_items ADD COLUMN IF NOT EXISTS confidence_level VARCHAR(50) DEFAULT 'UNKNOWN';",
     "ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS previous_stock NUMERIC(14,2) DEFAULT 0;",
     "ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS quantity NUMERIC(14,2) DEFAULT 0;",
     "ALTER TABLE inventory_transactions ADD COLUMN IF NOT EXISTS new_stock NUMERIC(14,2) DEFAULT 0;",
@@ -188,6 +175,51 @@ PG_COLUMN_UPDATES = [
     "ALTER TABLE audit_logs ALTER COLUMN created_at SET DEFAULT NOW();",
     "ALTER TABLE audit_logs ALTER COLUMN created_at DROP NOT NULL;",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS business_id INTEGER;",
+]
+
+LOCAL_PG_COLUMN_UPDATES = [
+    "ALTER TABLE purchase_items ADD COLUMN IF NOT EXISTS line_total NUMERIC(12,2) DEFAULT 0;",
+    "ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS uploaded_by VARCHAR(255);",
+    "ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS supplier_id INTEGER;",
+    "ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS supplier_name_extracted VARCHAR(255);",
+    "ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS processing_status VARCHAR(50) DEFAULT 'review_required';",
+    "ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS gst_amount NUMERIC(14,2) DEFAULT 0;",
+    "ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS ai_confidence NUMERIC(5,2) DEFAULT 0;",
+    "ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS raw_extraction_json TEXT;",
+    "ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ;",
+    "ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS confirmed_by VARCHAR(255);",
+    "ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS business_id INTEGER;",
+    "ALTER TABLE receipt_import_items ADD COLUMN IF NOT EXISTS master_product_id VARCHAR(100);",
+    "ALTER TABLE receipt_import_items ADD COLUMN IF NOT EXISTS confidence_score NUMERIC(5,2) DEFAULT 0;",
+    "ALTER TABLE receipt_import_items ADD COLUMN IF NOT EXISTS confidence_level VARCHAR(50) DEFAULT 'UNKNOWN';",
+]
+
+DATABASE_REGISTRY_DDL_STATEMENTS = [
+    """CREATE TABLE IF NOT EXISTS database_registry (
+        id SERIAL PRIMARY KEY,
+        database_name VARCHAR(63) NOT NULL UNIQUE,
+        database_type VARCHAR(16) NOT NULL,
+        business_type VARCHAR(30),
+        business_id INTEGER,
+        status VARCHAR(16) NOT NULL DEFAULT 'active',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );""",
+    "CREATE INDEX IF NOT EXISTS ix_database_registry_type ON database_registry (database_type);",
+    "CREATE INDEX IF NOT EXISTS ix_database_registry_business ON database_registry (business_id);",
+]
+
+DATABASE_REGISTRY_DDL_SQLITE_STATEMENTS = [
+    """CREATE TABLE IF NOT EXISTS database_registry (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        database_name VARCHAR(63) NOT NULL UNIQUE,
+        database_type VARCHAR(16) NOT NULL,
+        business_type VARCHAR(30),
+        business_id INTEGER,
+        status VARCHAR(16) NOT NULL DEFAULT 'active',
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );""",
+    "CREATE INDEX IF NOT EXISTS ix_database_registry_type ON database_registry (database_type);",
+    "CREATE INDEX IF NOT EXISTS ix_database_registry_business ON database_registry (business_id);",
 ]
 
 LOCAL_TABLES_SQL = """
@@ -307,11 +339,23 @@ CREATE TABLE IF NOT EXISTS purchase_items (
 _schema_ensured = set()
 
 
-def ensure_schema_compatibility(engine: Engine) -> None:
+def _run_sql_isolated(engine: Engine, stmt: str, desc: str = "") -> bool:
+    """Execute a single SQL statement in an isolated transaction so failures never abort subsequent statements."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(stmt))
+        return True
+    except Exception as exc:
+        logger.warning("Schema migration notice [%s]: %s", desc or stmt[:50].strip(), exc)
+        return False
+
+
+def ensure_schema_compatibility(engine: Engine, is_local_db: bool = False) -> None:
     """
     Idempotent schema verification and repair. Runs safely on any PostgreSQL or SQLite database.
+    Guarantees that each statement runs in isolation so no transaction aborts cascade.
     """
-    url_key = str(engine.url)
+    url_key = f"{str(engine.url)}:local={is_local_db}"
     if url_key in _schema_ensured:
         return
     _schema_ensured.add(url_key)
@@ -324,25 +368,54 @@ def ensure_schema_compatibility(engine: Engine) -> None:
 
     dialect_name = engine.dialect.name.lower()
 
-    with engine.connect() as conn:
-        # 2. Add missing columns for PostgreSQL
-        if dialect_name == "postgresql":
-            try:
-                conn.execute(text(";\n".join(PG_COLUMN_UPDATES) + ";"))
-            except Exception:
-                for stmt in PG_COLUMN_UPDATES:
-                    try:
-                        conn.execute(text(stmt))
-                    except Exception:
-                        pass
+    is_local = is_local_db
+    if not is_local:
+        try:
+            dbname = (engine.url.database or "").lower()
+            is_local = dbname.startswith("local_business_")
+        except Exception:
+            is_local = False
 
-            # Create local tables if not existing
-            try:
-                conn.execute(text(LOCAL_TABLES_SQL))
-            except Exception:
-                pass
+    if dialect_name == "postgresql":
+        # 2. Add missing columns for PostgreSQL admin/shared tables (executed individually)
+        for stmt in PG_COLUMN_UPDATES:
+            _run_sql_isolated(engine, stmt, "admin_column_update")
 
-            # Ensure reorder_list columns
+        # 3. Create database_registry table and populate entries
+        for ddl_stmt in DATABASE_REGISTRY_DDL_STATEMENTS:
+            _run_sql_isolated(engine, ddl_stmt, "create_database_registry")
+
+        reg_names = [
+            ("admin_db", "admin", None),
+            ("master_medical", "master", "medical"),
+            ("master_grocery", "master", "grocery"),
+            ("master_restaurant", "master", "restaurant"),
+            ("master_stationery", "master", "stationery"),
+            ("master_dairy", "master", "dairy"),
+        ]
+        for dbname, dbtype, btype in reg_names:
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("""
+                        INSERT INTO database_registry (database_name, database_type, business_type, status, created_at)
+                        VALUES (:dbname, :dbtype, :btype, 'active', NOW())
+                        ON CONFLICT (database_name) DO NOTHING;
+                    """), {"dbname": dbname, "dbtype": dbtype, "btype": btype})
+            except Exception as exc:
+                logger.warning("Database registry seed notice for %s: %s", dbname, exc)
+
+        # 4-6. Apply local tables and local column updates ONLY if this engine is for a local business database
+        if is_local:
+            # 4. Create local tables if not existing
+            for table_sql in LOCAL_TABLES_SQL.strip().split(";\n\n"):
+                if table_sql.strip():
+                    _run_sql_isolated(engine, table_sql.strip(), "local_table_creation")
+
+            # 5. Local column updates
+            for stmt in LOCAL_PG_COLUMN_UPDATES:
+                _run_sql_isolated(engine, stmt, "local_column_update")
+
+            # 6. Ensure reorder_list columns
             reorder_cols = [
                 "ALTER TABLE reorder_list ADD COLUMN IF NOT EXISTS current_stock NUMERIC(14,2) DEFAULT 0;",
                 "ALTER TABLE reorder_list ADD COLUMN IF NOT EXISTS reorder_level NUMERIC(14,2) DEFAULT 0;",
@@ -352,140 +425,148 @@ def ensure_schema_compatibility(engine: Engine) -> None:
                 "ALTER TABLE reorder_list ADD COLUMN IF NOT EXISTS target_stock NUMERIC(14,2) DEFAULT 0;",
                 "ALTER TABLE reorder_list ADD COLUMN IF NOT EXISTS notes TEXT;",
             ]
+            for stmt in reorder_cols:
+                _run_sql_isolated(engine, stmt, "reorder_col_update")
+
+        # 7. Views and cleanup
+        view_stmts = [
+            "UPDATE purchase_orders SET po_number = 'PO-' || id WHERE po_number IS NULL;",
+            "UPDATE inventory_transactions SET timestamp = COALESCE(timestamp, created_at), quantity = COALESCE(NULLIF(quantity, 0), quantity_delta, 0) WHERE timestamp IS NULL OR quantity = 0;",
+            "CREATE SCHEMA IF NOT EXISTS catalog;",
+            """CREATE OR REPLACE VIEW catalog.products AS 
+              SELECT id, sku, barcode, product_name, brand, category, subcategory, 
+                     COALESCE(description, '') as description 
+              FROM public.products;""",
+            """CREATE OR REPLACE VIEW catalog.suppliers AS 
+              SELECT id, name, email, phone, lead_time_days, minimum_order_quantity, reliability_score 
+              FROM public.suppliers;""",
+            """CREATE OR REPLACE VIEW catalog.medical_product_details AS
+              SELECT id as product_id, generic_name, dosage_form, strength, manufacturer, prescription_required
+              FROM public.products;""",
+            """CREATE OR REPLACE VIEW catalog.dairy_product_details AS
+              SELECT id as product_id, expiry_required, storage_temperature, shelf_life
+              FROM public.products;""",
+        ]
+        for stmt in view_stmts:
+            _run_sql_isolated(engine, stmt, "view_or_cleanup")
+
+    elif dialect_name == "sqlite":
+        # 3. Create database_registry table and populate entries in SQLite
+        for ddl_stmt in DATABASE_REGISTRY_DDL_SQLITE_STATEMENTS:
+            _run_sql_isolated(engine, ddl_stmt, "create_database_registry_sqlite")
+
+        reg_names = [
+            ("admin_db", "admin", None),
+            ("master_medical", "master", "medical"),
+            ("master_grocery", "master", "grocery"),
+            ("master_restaurant", "master", "restaurant"),
+            ("master_stationery", "master", "stationery"),
+            ("master_dairy", "master", "dairy"),
+        ]
+        for dbname, dbtype, btype in reg_names:
             try:
-                conn.execute(text(";\n".join(reorder_cols)))
-            except Exception:
-                for stmt in reorder_cols:
-                    try:
-                        conn.execute(text(stmt))
-                    except Exception:
-                        pass
+                with engine.begin() as conn:
+                    conn.execute(text("""
+                        INSERT OR IGNORE INTO database_registry (database_name, database_type, business_type, status, created_at)
+                        VALUES (:dbname, :dbtype, :btype, 'active', CURRENT_TIMESTAMP);
+                    """), {"dbname": dbname, "dbtype": dbtype, "btype": btype})
+            except Exception as exc:
+                logger.warning("Database registry seed notice for %s: %s", dbname, exc)
 
-            try:
-                conn.execute(text("""
-                    UPDATE purchase_orders SET po_number = 'PO-' || id WHERE po_number IS NULL;
-                    UPDATE inventory_transactions SET timestamp = COALESCE(timestamp, created_at), quantity = COALESCE(NULLIF(quantity, 0), quantity_delta, 0) WHERE timestamp IS NULL OR quantity = 0;
-                    CREATE SCHEMA IF NOT EXISTS catalog;
-                    CREATE OR REPLACE VIEW catalog.products AS 
-                      SELECT id, sku, barcode, product_name, brand, category, subcategory, 
-                             COALESCE(description, '') as description 
-                      FROM public.products;
-                    CREATE OR REPLACE VIEW catalog.suppliers AS 
-                      SELECT id, name, email, phone, lead_time_days, minimum_order_quantity, reliability_score 
-                      FROM public.suppliers;
-                    CREATE OR REPLACE VIEW catalog.medical_product_details AS
-                      SELECT id as product_id, generic_name, dosage_form, strength, manufacturer, prescription_required
-                      FROM public.products;
-                    CREATE OR REPLACE VIEW catalog.dairy_product_details AS
-                      SELECT id as product_id, expiry_required, storage_temperature, shelf_life
-                      FROM public.products;
-                """))
-            except Exception:
-                pass
+        # SQLite column additions
+        inspector = inspect(engine)
+        existing_tables = set(inspector.get_table_names())
+        
+        sqlite_columns = {
+            "businesses": [
+                ("owner_phone", "VARCHAR(40)"),
+                ("owner_personal_email", "VARCHAR(255)"),
+                ("phone", "VARCHAR(40)"),
+                ("address", "TEXT"),
+                ("business_type", "VARCHAR(30) DEFAULT 'grocery'"),
+                ("master_database_name", "VARCHAR(63) DEFAULT 'master_grocery'"),
+                ("local_database_name", "VARCHAR(63)"),
+                ("is_active", "BOOLEAN DEFAULT 1"),
+            ],
+            "users": [
+                ("business_id", "INTEGER"),
+            ],
+            "checkout_transactions": [
+                ("customer_prescribed_by", "VARCHAR(180)"),
+                ("customer_address", "TEXT"),
+                ("business_id", "INTEGER"),
+            ],
+            "checkout_items": [
+                ("product_sku", "VARCHAR(50) DEFAULT ''"),
+                ("business_id", "INTEGER"),
+                ("selected_weight_g", "INTEGER"),
+                ("weight_unit", "VARCHAR(2)"),
+            ],
+        }
 
-        elif dialect_name == "sqlite":
-            # For SQLite, check and add missing columns dynamically
-            inspector = inspect(engine)
-            existing_tables = set(inspector.get_table_names())
-            
-            sqlite_columns = {
-                "businesses": [
-                    ("owner_phone", "VARCHAR(40)"),
-                    ("owner_personal_email", "VARCHAR(255)"),
-                    ("phone", "VARCHAR(40)"),
-                    ("address", "TEXT"),
-                    ("business_type", "VARCHAR(30) DEFAULT 'grocery'"),
-                    ("master_database_name", "VARCHAR(63) DEFAULT 'master_grocery'"),
-                    ("local_database_name", "VARCHAR(63)"),
-                ],
-                "checkout_transactions": [
-                    ("customer_prescribed_by", "VARCHAR(180)"),
-                    ("customer_address", "TEXT"),
-                ],
-                "checkout_items": [
-                    ("product_sku", "VARCHAR(50) DEFAULT ''"),
-                ],
-            }
+        for tbl, cols in sqlite_columns.items():
+            if tbl in existing_tables:
+                existing_cols = {c["name"] for c in inspector.get_columns(tbl)}
+                for col_name, col_type in cols:
+                    if col_name not in existing_cols:
+                        _run_sql_isolated(engine, f"ALTER TABLE {tbl} ADD COLUMN {col_name} {col_type}", f"sqlite_col_{tbl}_{col_name}")
 
-            for tbl, cols in sqlite_columns.items():
-                if tbl in existing_tables:
-                    existing_cols = {c["name"] for c in inspector.get_columns(tbl)}
-                    for col_name, col_type in cols:
-                        if col_name not in existing_cols:
-                            try:
-                                conn.execute(text(f"ALTER TABLE {tbl} ADD COLUMN {col_name} {col_type}"))
-                            except Exception:
-                                pass
-
-        # 3. Ensure core application roles exist
+    # 8. Ensure core application roles exist
+    for role_name in ["admin", "business_owner", "associate"]:
         try:
-            for role_name in ["admin", "business_owner", "associate"]:
+            with engine.begin() as conn:
+                role_id = str(uuid.uuid4())
                 if dialect_name == "postgresql":
                     conn.execute(text("""
-                        INSERT INTO roles (name, description)
-                        VALUES (:name, :desc)
+                        INSERT INTO roles (id, name, description)
+                        VALUES (:id, :name, :desc)
                         ON CONFLICT (name) DO NOTHING;
-                    """), {"name": role_name, "desc": f"{role_name.replace('_', ' ').title()} application role"})
+                    """), {"id": role_id, "name": role_name, "desc": f"{role_name.replace('_', ' ').title()} application role"})
                 else:
                     if not conn.execute(text("SELECT 1 FROM roles WHERE name = :name"), {"name": role_name}).fetchone():
-                        conn.execute(text("INSERT INTO roles (name, description) VALUES (:name, :desc)"),
-                                     {"name": role_name, "desc": f"{role_name.replace('_', ' ').title()} role"})
+                        conn.execute(text("INSERT INTO roles (id, name, description) VALUES (:id, :name, :desc)"),
+                                     {"id": role_id, "name": role_name, "desc": f"{role_name.replace('_', ' ').title()} role"})
         except Exception as exc:
             logger.warning("Roles seeding warning: %s", exc)
 
-        # 4. Ensure at least one active Super Administrator user exists
-        try:
+    # 9. Ensure at least one active Super Administrator user exists
+    try:
+        with engine.begin() as conn:
             admin_exists = conn.execute(text("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1")).fetchone()
             if not admin_exists:
                 admin_pw = hash_password("Admin123!")
+                admin_id = str(uuid.uuid4())
                 if dialect_name == "postgresql":
                     conn.execute(text("""
-                        INSERT INTO users (email, full_name, password_hash, role, is_active)
-                        VALUES ('admin@inventory.example.com', 'System Administrator', :pw, 'admin', TRUE)
+                        INSERT INTO users (id, email, full_name, password_hash, role, is_active, created_at, updated_at)
+                        VALUES (:id, 'admin@inventory.example.com', 'System Administrator', :pw, 'admin', TRUE, NOW(), NOW())
                         ON CONFLICT (email) DO NOTHING;
-                    """), {"pw": admin_pw})
+                    """), {"id": admin_id, "pw": admin_pw})
                 else:
                     conn.execute(text("""
-                        INSERT OR IGNORE INTO users (email, full_name, password_hash, role, is_active)
-                        VALUES ('admin@inventory.example.com', 'System Administrator', :pw, 'admin', 1)
-                    """), {"pw": admin_pw})
-        except Exception as exc:
-            logger.warning("Admin user seed warning: %s", exc)
+                        INSERT OR IGNORE INTO users (id, email, full_name, password_hash, role, is_active, created_at, updated_at)
+                        VALUES (:id, 'admin@inventory.example.com', 'System Administrator', :pw, 'admin', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """), {"id": admin_id, "pw": admin_pw})
+    except Exception as exc:
+        logger.warning("Admin user seed warning: %s", exc)
 
-        # 5. Ensure database_registry entries exist
+    # 10. Stamp alembic_version to head if alembic table exists
+    if dialect_name == "postgresql":
+        _run_sql_isolated(engine, """
+            CREATE TABLE IF NOT EXISTS alembic_version (
+                version_num VARCHAR(32) NOT NULL PRIMARY KEY
+            );
+        """, "create_alembic_version")
         try:
-            reg_names = [
-                ("admin_db", "admin", None),
-                ("master_medical", "master", "medical"),
-                ("master_grocery", "master", "grocery"),
-                ("master_restaurant", "master", "restaurant"),
-                ("master_stationery", "master", "stationery"),
-                ("master_dairy", "master", "dairy"),
-            ]
-            for dbname, dbtype, btype in reg_names:
-                if dialect_name == "postgresql":
-                    conn.execute(text("""
-                        INSERT INTO database_registry (database_name, database_type, business_type, status)
-                        VALUES (:dbname, :dbtype, :btype, 'active')
-                        ON CONFLICT (database_name) DO NOTHING;
-                    """), {"dbname": dbname, "dbtype": dbtype, "btype": btype})
-        except Exception:
-            pass
-
-        # 6. Stamp alembic_version to head if alembic table exists
-        try:
-            if dialect_name == "postgresql":
-                conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS alembic_version (
-                        version_num VARCHAR(32) NOT NULL PRIMARY KEY
-                    );
-                """))
+            with engine.begin() as conn:
                 current_rev = conn.execute(text("SELECT version_num FROM alembic_version LIMIT 1")).scalar()
                 if not current_rev:
                     conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('0008_checkout_business_details');"))
                 else:
                     conn.execute(text("UPDATE alembic_version SET version_num = '0008_checkout_business_details';"))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Alembic version stamp notice: %s", exc)
 
-        conn.commit()
+    logger.info("Database schema compatibility check completed successfully.")
+
+    logger.info("Database schema compatibility check completed successfully.")

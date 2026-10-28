@@ -4,7 +4,7 @@ from typing import Generator, Optional
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from .config import get_settings
 from .database_manager import get_admin_session, get_local_session, get_master_session
 from .models import AuthSession, Business, User, UserPermission
@@ -53,7 +53,7 @@ def get_current_user(
             detail="Invalid or expired access token."
         )
 
-    user = admin_db.query(User).filter(User.email == email, User.is_active.is_(True)).first()
+    user = admin_db.query(User).options(joinedload(User.business)).filter(User.email == email, User.is_active.is_(True)).first()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -74,7 +74,12 @@ def get_current_user(
 
     # Attach dynamic database routing info to the user object
     if user.role != "admin":
-        business = admin_db.get(Business, user.business_id) if user.business_id else None
+        business = user.business
+        if not business and user.business_id:
+            try:
+                business = admin_db.get(Business, user.business_id)
+            except Exception:
+                business = None
         if not business or not business.is_active:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,

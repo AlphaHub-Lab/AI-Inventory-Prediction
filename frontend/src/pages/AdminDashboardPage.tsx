@@ -3,6 +3,7 @@ import { Activity, AlertTriangle, Building2, Database, IndianRupee, PackageCheck
 import { CartesianGrid, Cell, Legend, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { api } from '../lib/api'
 import LoadingState from '../components/LoadingState'
+import ErrorBoundary from '../components/ErrorBoundary'
 import type { PageKey } from '../components/Layout'
 
 type AdminDashboardData = {
@@ -18,6 +19,28 @@ type AdminDashboardData = {
 const chartColors = ['#16816b', '#e49a3a', '#4f8291', '#8a6b55', '#65a276', '#c66550', '#7287bd', '#b586bd']
 function localDate(value: Date) {
   return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`
+}
+
+function sanitizeError(e: unknown, fallback: string): string {
+  if (e instanceof Error) {
+    const msg = e.message
+    if (
+      msg.includes('psycopg') ||
+      msg.includes('SQL') ||
+      msg.includes('relation') ||
+      msg.includes('column') ||
+      msg.includes('UndefinedColumn') ||
+      msg.includes('syntax error') ||
+      msg.includes('OperationalError') ||
+      msg.includes('ProgrammingError') ||
+      msg.includes('503') ||
+      msg.includes('500')
+    ) {
+      return 'Database service is initializing or temporarily busy. Please refresh in a moment.'
+    }
+    return msg
+  }
+  return fallback
 }
 
 export default function AdminDashboardPage({ onNavigate }: { onNavigate: (page: PageKey) => void }) {
@@ -41,7 +64,7 @@ export default function AdminDashboardPage({ onNavigate }: { onNavigate: (page: 
     setError('')
     api<AdminDashboardData>(`/api/admin/dashboard?${params}`)
       .then(result => { if (alive) setData(result) })
-      .catch(reason => { if (alive) setError(reason instanceof Error ? reason.message : 'Unable to load global business signals.') })
+      .catch(reason => { if (alive) setError(sanitizeError(reason, 'Unable to load global business signals.')) })
       .finally(() => { if (alive) setLoading(false) })
     return () => { alive = false }
   }, [days, businessId, category, refreshKey])
@@ -68,7 +91,7 @@ export default function AdminDashboardPage({ onNavigate }: { onNavigate: (page: 
     { label: `Revenue · ${days} days`, value: `₹${stats.revenue.toLocaleString('en-IN', { maximumFractionDigits: 1 })}`, sub: 'Recorded sales across workspaces', icon: IndianRupee, tone: 'blue' },
   ] : []
 
-  return <div className="global-dashboard">
+  return <ErrorBoundary><div className="global-dashboard">
     <header className="page-header global-dashboard-header">
       <div>
         <p className="eyebrow">CENTRAL OPERATIONS · SUPER ADMINISTRATOR</p>
@@ -120,5 +143,5 @@ export default function AdminDashboardPage({ onNavigate }: { onNavigate: (page: 
 
       <section className="insight-strip global-insight-strip"><span>Expected 7-day demand <strong>{stats?.expected_demand.toLocaleString()} units</strong></span><span>Predicted waste exposure <strong>₹{stats?.predicted_waste_value.toLocaleString('en-IN')}</strong></span><span>Inventory value <strong>₹{stats?.inventory_value.toLocaleString('en-IN')}</strong></span><span>Recommended orders <strong>{stats?.recommended_orders.toLocaleString()}</strong></span><span>Active accounts <strong>{stats?.accounts.toLocaleString()}</strong></span></section>
     </>}
-  </div>
+  </div></ErrorBoundary>
 }

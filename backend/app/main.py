@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import logging
 import os
 import secrets
 from pathlib import Path
@@ -21,6 +22,7 @@ from .routers.inventory_system_router import router as inventory_system_router
 from .rate_limit import limiter
 from .db import engine
 
+logger = logging.getLogger("main")
 settings = get_settings()
 
 
@@ -31,22 +33,36 @@ async def lifespan(app: FastAPI):
         from .schema_migration import ensure_schema_compatibility
         ensure_schema_compatibility(engine)
     except Exception as e:
-        print(f"Notice on schema compatibility check: {e}")
+        logger.error("Notice on schema compatibility check: %s", e, exc_info=True)
 
     # In serverless environments like Vercel, avoid long-running migrations and seeding during cold start
-    is_serverless = bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
+    is_serverless = bool(
+        os.getenv("VERCEL")
+        or os.getenv("VERCEL_ENV")
+        or os.getenv("AWS_LAMBDA_FUNCTION_NAME")
+        or os.getenv("SINGLE_DATABASE_MODE", "").lower() in ("1", "true", "yes")
+        or "pooler.supabase.com" in settings.database_url.lower()
+        or "supabase.co" in settings.database_url.lower()
+        or "neon.tech" in settings.database_url.lower()
+    )
+    is_production = settings.environment.lower() in ("production", "prod") or os.getenv("VERCEL_ENV") == "production"
     if not is_serverless and not (os.getenv("SKIP_ALEMBIC_STARTUP") == "1" or settings.skip_alembic_startup or "inventory_system" in settings.database_url):
         try:
             config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
             command.upgrade(config, "head")
         except Exception as e:
-            print(f"Warning on startup migration: {e}")
-    if not is_serverless and not (os.getenv("SKIP_SEEDING_STARTUP") == "1"):
+            logger.warning("Warning on startup migration: %s", e)
+    if not is_serverless and not is_production and not (os.getenv("SKIP_SEEDING_STARTUP") == "1"):
         try:
             from .seed import seed
             seed()
         except Exception as e:
-            print(f"Warning on startup database seeding: {e}")
+            logger.warning("Warning on startup database seeding: %s", e)
+    else:
+        logger.info(
+            "Skipping startup database seeding (is_serverless=%s, is_production=%s, skip_flag=%s)",
+            is_serverless, is_production, os.getenv("SKIP_SEEDING_STARTUP") == "1"
+        )
     yield
     # Shutdown
 
@@ -82,22 +98,44 @@ async def unhandled_exception_handler(_: Request, exc: Exception):
     err_str = str(exc)
     err_lower = err_str.lower()
     exc_type = type(exc).__name__.lower()
+    is_prod = settings.environment.lower() in ("production", "prod")
+
+    logger.exception("Unhandled server exception: %s", exc)
+
     if (
         "operationalerror" in exc_type
+        or "programmingerror" in exc_type
+        or "undefinedcolumn" in err_lower
+        or "undefinedtable" in err_lower
+        or "relation does not exist" in err_lower
+        or "column does not exist" in err_lower
+        or "infailedsqltransaction" in err_lower
+        or "syntax error" in err_lower
+        or "statement error" in err_lower
         or "timeout" in err_lower
         or any(k in err_lower for k in [
             "connection refused", "could not translate host name", "operationalerror",
             "connection to server at", "password authentication failed", "ssl connection",
-            "relation does not exist", "undefinedtable", "timeout", "timed out"
+            "relation does not exist", "undefinedtable", "timeout", "timed out", "psycopg"
         ])
     ):
         return JSONResponse(
             status_code=503,
-            content={"error": {"message": "Database error: Unable to connect or initialize. Please check your DATABASE_URL in Vercel Project Settings.", "status": 503}}
+            content={"error": {"message": "Database temporary unavailability or initialization in progress. Please retry momentarily.", "status": 503}}
         )
+
+    # In any environment, suppress raw SQL error text from API responses
+    sql_keywords = ("select ", "insert ", "update ", "delete ", "alter table", "create table", "psycopg", "syntax error at or near", "column ", "relation ")
+    if any(kw in err_lower for kw in sql_keywords):
+        return JSONResponse(
+            status_code=503,
+            content={"error": {"message": "Database service is initializing or temporarily busy. Please refresh in a moment.", "status": 503}}
+        )
+
+    user_msg = "An unexpected server error occurred. Please contact system administrator." if is_prod else f"Server error: {err_str}"
     return JSONResponse(
         status_code=500,
-        content={"error": {"message": f"Server error: {err_str}", "status": 500}}
+        content={"error": {"message": user_msg, "status": 500}}
     )
 
 

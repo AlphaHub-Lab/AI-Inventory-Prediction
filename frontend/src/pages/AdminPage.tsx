@@ -3,6 +3,7 @@ import { Activity, Database, Download, RefreshCw, ShieldCheck, Trash2, UserPlus,
 import { api } from '../lib/api'
 import type { User } from '../types'
 import LoadingState from '../components/LoadingState'
+import ErrorBoundary from '../components/ErrorBoundary'
 
 type Overview = { counts: Record<string, number>; active_accounts: number; sales_revenue: number; database_engine: string; database_bytes: number | null }
 type Account = { id: number; email: string; full_name: string; role: User['role']; is_active: boolean; created_at: string; business_id: number | null; business_name: string | null; audit_events: number; inventory_movements: number; chat_conversations: number; purchase_orders: number }
@@ -47,17 +48,57 @@ export default function AdminPage({ currentUser }: { currentUser: User }) {
   const [emailCodeSent, setEmailCodeSent] = useState(false)
   const [verifiedPersonalEmail, setVerifiedPersonalEmail] = useState('')
 
+function sanitizeError(e: unknown, fallback: string): string {
+  if (e instanceof Error) {
+    const msg = e.message
+    if (
+      msg.includes('psycopg') ||
+      msg.includes('SQL') ||
+      msg.includes('relation') ||
+      msg.includes('column') ||
+      msg.includes('UndefinedColumn') ||
+      msg.includes('syntax error') ||
+      msg.includes('OperationalError') ||
+      msg.includes('ProgrammingError') ||
+      msg.includes('503') ||
+      msg.includes('500')
+    ) {
+      return 'Database service is initializing or temporarily busy. Please refresh in a moment.'
+    }
+    return msg
+  }
+  return fallback
+}
+
   async function load() {
     setError('')
     try {
-      const [summary, userRows, activityRows, businessRows, alertRows] = await Promise.all([
-        api<Overview>('/api/admin/overview'), api<Account[]>('/api/admin/accounts'), api<ActivityEvent[]>('/api/admin/activity?limit=100'),
-        api<BusinessRow[]>('/api/admin/businesses'), api<AlertRow[]>('/api/admin/notifications'),
+      const [resSummary, resUsers, resActivity, resBusinesses, resAlerts] = await Promise.allSettled([
+        api<Overview>('/api/admin/overview'),
+        api<Account[]>('/api/admin/accounts'),
+        api<ActivityEvent[]>('/api/admin/activity?limit=100'),
+        api<BusinessRow[]>('/api/admin/businesses'),
+        api<AlertRow[]>('/api/admin/notifications'),
       ])
-      setOverview(summary); setAccounts(userRows); setEvents(activityRows); setBusinesses(businessRows); setAlerts(alertRows)
-      setDrafts(Object.fromEntries(userRows.map(user => [user.id, { role: user.role, is_active: user.is_active, business_id: user.business_id }])))
-    } catch (e) { setError(e instanceof Error ? e.message : 'Could not load administrator data.') }
-    finally { setPageLoading(false) }
+
+      if (resSummary.status === 'fulfilled') setOverview(resSummary.value)
+      if (resUsers.status === 'fulfilled') {
+        setAccounts(resUsers.value)
+        setDrafts(Object.fromEntries(resUsers.value.map(user => [user.id, { role: user.role, is_active: user.is_active, business_id: user.business_id }])))
+      }
+      if (resActivity.status === 'fulfilled') setEvents(resActivity.value)
+      if (resBusinesses.status === 'fulfilled') setBusinesses(resBusinesses.value)
+      if (resAlerts.status === 'fulfilled') setAlerts(resAlerts.value)
+
+      const failures = [resSummary, resUsers, resActivity, resBusinesses, resAlerts].filter(r => r.status === 'rejected') as PromiseRejectedResult[]
+      if (failures.length > 0) {
+        setError(sanitizeError(failures[0].reason, 'Some administrator services are temporarily unavailable.'))
+      }
+    } catch (e) {
+      setError(sanitizeError(e, 'Could not load administrator data.'))
+    } finally {
+      setPageLoading(false)
+    }
   }
   useEffect(() => { void load() }, [])
 
@@ -193,7 +234,7 @@ export default function AdminPage({ currentUser }: { currentUser: User }) {
 
   if (pageLoading) return <LoadingState label="Loading administrator workspace…" />
 
-  return <div className="admin-page">
+  return <ErrorBoundary><div className="admin-page">
     <header className="page-header">
       <div><p className="eyebrow">CENTRAL ACCESS · CROSS-BUSINESS OVERSIGHT</p><h1>Super Administrator</h1><p>Oversee every business workspace, account, resource, and operational alert.</p></div>
       <div className="header-actions">
@@ -253,5 +294,5 @@ export default function AdminPage({ currentUser }: { currentUser: User }) {
         <p className="admin-footnote"><Activity size={15}/><span>Showing the latest {events.length} events (up to 100). Export downloads this visible set.</span></p>
       </div>}
     </section>
-  </div>
+  </div></ErrorBoundary>
 }

@@ -19,10 +19,9 @@ settings = get_settings()
 
 def get_base_postgres_url() -> str:
     """Extract base connection URL without database name."""
-    raw_url = settings.database_url
-    # The backend requirements install psycopg v3 (`psycopg[binary]`). Keep
-    # all per-database engines on that driver rather than rewriting URLs to
-    # psycopg2, which is not installed in this project environment.
+    raw_url = get_settings().database_url
+    if raw_url.startswith("sqlite"):
+        return raw_url
     if raw_url.startswith("postgresql://"):
         raw_url = raw_url.replace("postgresql://", "postgresql+psycopg://", 1)
     elif raw_url.startswith("postgresql+psycopg2://"):
@@ -35,8 +34,12 @@ def get_base_postgres_url() -> str:
 
 def database_url_for(dbname: str, *, sqlalchemy_driver: bool = True) -> str:
     """Build a database-specific URL while preserving URL query options."""
+    current_db_url = get_settings().database_url
+    if current_db_url.startswith("sqlite"):
+        return current_db_url
+    base = get_base_postgres_url()
     scheme = "postgresql+psycopg" if sqlalchemy_driver else "postgresql"
-    return urlunparse(urlparse(BASE_URL)._replace(scheme=scheme, path=f"/{dbname}"))
+    return urlunparse(urlparse(base)._replace(scheme=scheme, path=f"/{dbname}"))
 
 BASE_URL = get_base_postgres_url()
 _ENGINES: Dict[str, Engine] = {}
@@ -48,14 +51,21 @@ def get_engine_for_db(dbname: str, *, ensure_schema: bool = True) -> Engine:
     safe_dbname = re.sub(r'[^a-zA-Z0-9_-]', '', dbname)
     if safe_dbname not in _ENGINES:
         db_url = database_url_for(safe_dbname)
+        is_serverless = is_single_database_mode()
+        engine_kwargs = {"pool_pre_ping": True}
+        if not db_url.startswith("sqlite"):
+            engine_kwargs.update({
+                "pool_size": 2 if is_serverless else 5,
+                "max_overflow": 3 if is_serverless else 10,
+                "pool_recycle": 300,
+                "connect_args": {"connect_timeout": 10 if is_serverless else 30},
+                "use_insertmanyvalues": False
+            })
+        else:
+            engine_kwargs["connect_args"] = {"check_same_thread": False}
         _ENGINES[safe_dbname] = create_engine(
             db_url,
-            pool_size=5,
-            max_overflow=10,
-            pool_pre_ping=True,
-            pool_recycle=300,
-            connect_args={"connect_timeout": 30},
-            use_insertmanyvalues=False
+            **engine_kwargs
         )
         _SESSION_MAKERS[safe_dbname] = sessionmaker(
             autocommit=False,
@@ -64,32 +74,12 @@ def get_engine_for_db(dbname: str, *, ensure_schema: bool = True) -> Engine:
         )
     if ensure_schema and safe_dbname.startswith("local_business_") and safe_dbname not in _ENSURED_TENANT_SCHEMAS:
         try:
-            with _ENGINES[safe_dbname].connect() as conn:
-                conn.execute(text("ALTER TABLE reorder_list ADD COLUMN IF NOT EXISTS reason TEXT;"))
-                conn.execute(text("ALTER TABLE reorder_list ADD COLUMN IF NOT EXISTS received_quantity NUMERIC(14,2) DEFAULT 0;"))
-                conn.execute(text("ALTER TABLE reorder_list ADD COLUMN IF NOT EXISTS target_stock NUMERIC(14,2) DEFAULT 0;"))
-                conn.execute(text("ALTER TABLE reorder_list ADD COLUMN IF NOT EXISTS notes TEXT;"))
-                conn.execute(text("ALTER TABLE receipt_import_items ADD COLUMN IF NOT EXISTS barcode VARCHAR(100);"))
-                conn.execute(text("ALTER TABLE receipt_import_items ADD COLUMN IF NOT EXISTS serial_number VARCHAR(100);"))
-                conn.execute(text("ALTER TABLE receipt_import_items ADD COLUMN IF NOT EXISTS size VARCHAR(50);"))
-                conn.execute(text("ALTER TABLE receipt_import_items ADD COLUMN IF NOT EXISTS color VARCHAR(50);"))
-                conn.execute(text("ALTER TABLE receipt_import_items ADD COLUMN IF NOT EXISTS variant_name VARCHAR(150);"))
-                conn.execute(text("ALTER TABLE receipt_import_items ADD COLUMN IF NOT EXISTS custom_attributes JSONB DEFAULT '{}'::jsonb;"))
-                conn.execute(text("ALTER TABLE receipt_import_items ADD COLUMN IF NOT EXISTS error_message TEXT;"))
-                conn.execute(text("ALTER TABLE inventory_batches ADD COLUMN IF NOT EXISTS serial_number VARCHAR(100);"))
-                conn.execute(text("ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS file_hash VARCHAR(64);"))
-                conn.execute(text("ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS duplicate_warning BOOLEAN DEFAULT FALSE;"))
-                conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS size VARCHAR(50);"))
-                conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS color VARCHAR(50);"))
-                conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS style VARCHAR(100);"))
-                conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS variant_name VARCHAR(150);"))
-                conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS target_stock NUMERIC(14,2) DEFAULT 0;"))
-                conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS custom_attributes JSONB DEFAULT '{}'::jsonb;"))
-                conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS parent_product_id INT REFERENCES products(id) ON DELETE SET NULL;"))
-                conn.commit()
+            from .schema_migration import ensure_schema_compatibility
+            ensure_schema_compatibility(_ENGINES[safe_dbname], is_local_db=True)
             _ENSURED_TENANT_SCHEMAS.add(safe_dbname)
-        except Exception:
-            pass
+        except Exception as exc:
+            import logging
+            logging.getLogger("database_manager").warning("Notice ensuring tenant schema for %s: %s", safe_dbname, exc)
     return _ENGINES[safe_dbname]
 
 def is_single_database_mode() -> bool:
@@ -109,13 +99,18 @@ def is_single_database_mode() -> bool:
 
 def get_session_for_db(dbname: str, *, ensure_schema: bool = True) -> Session:
     """Create a new SQLAlchemy session for a specific database."""
-    get_engine_for_db(dbname, ensure_schema=ensure_schema)
-    return _SESSION_MAKERS[dbname]()
+    safe_dbname = re.sub(r'[^a-zA-Z0-9_-]', '', dbname) or "admin_db"
+    get_engine_for_db(safe_dbname, ensure_schema=ensure_schema)
+    return _SESSION_MAKERS[safe_dbname]()
 
 def get_admin_session() -> Session:
-    parsed = urlparse(settings.database_url)
-    target = parsed.path.lstrip("/")
-    dbname = os.getenv("ADMIN_DB_NAME") or target or "admin_db"
+    raw_url = get_settings().database_url
+    if raw_url.startswith("sqlite"):
+        dbname = os.getenv("ADMIN_DB_NAME") or "admin_db"
+    else:
+        parsed = urlparse(raw_url)
+        target = parsed.path.lstrip("/")
+        dbname = os.getenv("ADMIN_DB_NAME") or target or "admin_db"
     return get_session_for_db(dbname)
 
 def get_master_session(business_type: str) -> Session:
